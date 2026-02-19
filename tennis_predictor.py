@@ -1,218 +1,609 @@
 """
-Tennis Match Prediction Algorithm
+Tennis Match Prediction Engine
+================================
+Simulates tennis matches point-by-point using a Monte Carlo approach.
 
-Uses an Elo rating system with adjustments for:
-- Court surface (clay, grass, hard, carpet)
-- Recent form (last 10 matches)
-- Head-to-head record
+Simulation hierarchy:
+  Point → Game (deuce/advantage logic) → Set (tiebreak at 6-6) → Match
+
+Player statistics drive point-win probabilities, adjusted for:
+  - Court surface (clay / grass / hard / carpet)
+  - Momentum (recent point streaks)
+  - Fatigue (later sets in long matches)
+  - Pressure situations (break points, set points, match points)
+
+Run `python tennis_predictor.py` to see a demo.
 """
 
 import math
+import random
+import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 SURFACES = {"clay", "grass", "hard", "carpet"}
 
-# How much each Elo update shifts ratings
-K_FACTOR = 32
+# Surface multipliers applied to the server's base serve-win probability.
+# Values > 1.0 favour the server; < 1.0 favour the returner.
+SURFACE_SERVE_MULTIPLIER = {
+    "clay":   0.94,   # slower courts, more baseline rallies
+    "grass":  1.07,   # fast surface, serve dominates
+    "hard":   1.00,   # neutral baseline
+    "carpet": 1.04,   # fast indoor surface
+}
 
-# Weight of surface-specific Elo vs overall Elo
-SURFACE_WEIGHT = 0.4
+# Momentum: fraction of probability shifted toward the player on a streak.
+MOMENTUM_WEIGHT = 0.03
+MOMENTUM_STREAK_THRESHOLD = 3   # consecutive points to trigger momentum
 
-# Weight of head-to-head record in final probability
-H2H_WEIGHT = 0.15
+# Fatigue: probability reduction per set played beyond set 2 (for each player).
+FATIGUE_PER_SET = 0.005
 
-# Number of recent matches used for form calculation
-FORM_WINDOW = 10
+# Pressure: extra probability shift for the player *defending* a pressure point.
+# Positive = defending player is MORE likely to win the point (holds nerve).
+# Set to a small negative value to model choking under pressure.
+PRESSURE_DELTA = -0.02
+
+# Default number of Monte Carlo simulations.
+DEFAULT_SIMULATIONS = 10_000
 
 
-@dataclass
-class Player:
-    name: str
-    elo: float = 1500.0
-    surface_elo: dict = field(default_factory=lambda: {s: 1500.0 for s in SURFACES})
-    match_history: list = field(default_factory=list)  # list of True/False (win/loss)
-
-    def record_result(self, won: bool, surface: str, elo_delta: float, surface_elo_delta: float):
-        self.elo += elo_delta
-        self.surface_elo[surface] = self.surface_elo.get(surface, 1500.0) + surface_elo_delta
-        self.match_history.append(won)
-
-    def recent_form(self) -> float:
-        """Returns win rate over last FORM_WINDOW matches (0.0 - 1.0)."""
-        recent = self.match_history[-FORM_WINDOW:]
-        if not recent:
-            return 0.5
-        return sum(recent) / len(recent)
-
-    def combined_elo(self, surface: str) -> float:
-        """Blends overall Elo with surface-specific Elo."""
-        s_elo = self.surface_elo.get(surface, 1500.0)
-        return (1 - SURFACE_WEIGHT) * self.elo + SURFACE_WEIGHT * s_elo
-
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 @dataclass
-class HeadToHead:
-    wins_a: int = 0
-    wins_b: int = 0
-
-    def win_rate_a(self) -> float:
-        total = self.wins_a + self.wins_b
-        if total == 0:
-            return 0.5
-        return self.wins_a / total
-
-    def record_win(self, player_a_won: bool):
-        if player_a_won:
-            self.wins_a += 1
-        else:
-            self.wins_b += 1
-
-
-def elo_expected(rating_a: float, rating_b: float) -> float:
-    """Expected win probability for player A given both Elo ratings."""
-    return 1.0 / (1.0 + math.pow(10, (rating_b - rating_a) / 400.0))
-
-
-def predict_match(
-    player_a: Player,
-    player_b: Player,
-    surface: str,
-    h2h: Optional[HeadToHead] = None,
-) -> dict:
+class PlayerStats:
     """
-    Predict the win probability for player_a vs player_b.
+    Service and return statistics for one player on a given surface.
 
-    Args:
-        player_a: First player.
-        player_b: Second player.
-        surface: Court surface ('clay', 'grass', 'hard', 'carpet').
-        h2h: Optional head-to-head record between the two players.
+    All probabilities are in [0, 1].
+
+    Attributes:
+        name:               Player display name.
+        first_serve_in:     Probability the first serve lands in.
+        first_serve_won:    Probability of winning the point when 1st serve is in.
+        second_serve_won:   Probability of winning the point on 2nd serve (always in).
+        return_adj:         Additive adjustment to opponent's serve-win prob when
+                            this player is returning (negative = better returner).
+        tiebreak_bonus:     Extra serve-win probability in tiebreak games.
+        pressure_adj:       Additive adjust under pressure (break/set/match point).
+                            Positive = mentally stronger; negative = tends to choke.
+        fatigue_resistance: Multiplier on fatigue effect (1.0 = average; <1 = fitter).
+    """
+    name: str
+    first_serve_in: float = 0.62
+    first_serve_won: float = 0.72
+    second_serve_won: float = 0.52
+    return_adj: float = 0.0
+    tiebreak_bonus: float = 0.02
+    pressure_adj: float = 0.0
+    fatigue_resistance: float = 1.0
+
+
+@dataclass
+class MatchConfig:
+    """
+    Configuration for a single match.
+
+    Attributes:
+        surface:    Court surface.
+        best_of:    Total sets in the match (3 or 5).
+        final_set_tiebreak: If True, a tiebreak is played at 6-6 in the final set.
+                            If False, the final set continues until 2-clear (Wimbledon style).
+        momentum:   Whether to model point-streak momentum.
+        fatigue:    Whether to model fatigue in later sets.
+        pressure:   Whether to model pressure-point effects.
+    """
+    surface: str = "hard"
+    best_of: int = 3
+    final_set_tiebreak: bool = True
+    momentum: bool = True
+    fatigue: bool = True
+    pressure: bool = True
+
+    def __post_init__(self):
+        if self.surface not in SURFACES:
+            raise ValueError(f"surface must be one of {SURFACES}")
+        if self.best_of not in (3, 5):
+            raise ValueError("best_of must be 3 or 5")
+
+
+@dataclass
+class MatchState:
+    """Mutable state tracked during a single simulated match."""
+    sets_a: int = 0
+    sets_b: int = 0
+    # Points won in current match (for momentum)
+    last_point_winner: Optional[str] = None
+    streak_a: int = 0
+    streak_b: int = 0
+    # Sets played (for fatigue)
+    sets_completed: int = 0
+
+
+@dataclass
+class SimulationResult:
+    """Aggregated results across all Monte Carlo runs."""
+    player_a: str
+    player_b: str
+    surface: str
+    n_simulations: int
+    wins_a: int
+    wins_b: int
+    # Set distribution  e.g. {(2,0): 1200, (2,1): 800}
+    set_distribution: dict = field(default_factory=dict)
+    # Average games played per match
+    avg_games: float = 0.0
+
+    @property
+    def win_prob_a(self) -> float:
+        return self.wins_a / self.n_simulations
+
+    @property
+    def win_prob_b(self) -> float:
+        return self.wins_b / self.n_simulations
+
+    def summary(self) -> str:
+        lines = [
+            f"\n{'='*52}",
+            f"  {self.player_a}  vs  {self.player_b}",
+            f"  Surface: {self.surface.upper()}   |   Simulations: {self.n_simulations:,}",
+            f"{'='*52}",
+            f"  {self.player_a:<28} {self.win_prob_a*100:5.1f}%",
+            f"  {self.player_b:<28} {self.win_prob_b*100:5.1f}%",
+            f"",
+            f"  Average match length: {self.avg_games:.1f} games",
+            f"",
+            f"  Score distribution:",
+        ]
+        for score, count in sorted(self.set_distribution.items(), key=lambda x: -x[1]):
+            pct = count / self.n_simulations * 100
+            lines.append(f"    {score[0]}-{score[1]}   {pct:5.1f}%")
+        lines.append(f"{'='*52}\n")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Core probability engine
+# ---------------------------------------------------------------------------
+
+def base_serve_win_prob(server: PlayerStats, returner: PlayerStats, surface: str) -> float:
+    """
+    Compute the probability that the server wins a single point.
+
+    Combines:
+      - server's first/second serve statistics
+      - returner's return adjustment
+      - surface multiplier
+    """
+    mult = SURFACE_SERVE_MULTIPLIER[surface]
+
+    # Probability server wins point on first serve (if it lands in)
+    p1 = server.first_serve_won
+    # Probability server wins point on second serve
+    p2 = server.second_serve_won
+
+    # Blend: first serve goes in with probability server.first_serve_in
+    raw = server.first_serve_in * p1 + (1 - server.first_serve_in) * p2
+
+    # Apply surface and returner quality
+    adjusted = raw * mult + returner.return_adj
+
+    return max(0.05, min(0.95, adjusted))
+
+
+def point_win_prob(
+    server: PlayerStats,
+    returner: PlayerStats,
+    config: MatchConfig,
+    state: MatchState,
+    is_tiebreak: bool = False,
+    is_pressure: bool = False,
+) -> float:
+    """
+    Full point-win probability for the server, incorporating all modifiers.
+    """
+    p = base_serve_win_prob(server, returner, config.surface)
+
+    # Tiebreak bonus
+    if is_tiebreak:
+        p += server.tiebreak_bonus
+
+    # Pressure adjustment (break point / set point / match point)
+    if is_pressure and config.pressure:
+        # Server is defending (trying to hold) – pressure_adj models nerve
+        p += server.pressure_adj
+        # Returner is attacking – use their pressure_adj too
+        p -= returner.pressure_adj * 0.5
+
+    # Momentum
+    if config.momentum:
+        if state.streak_a >= MOMENTUM_STREAK_THRESHOLD:
+            # Server is on a streak: server = A (we need to check context outside)
+            # This flag is set by the caller; we use a generic "streak_server" flag.
+            pass  # handled by caller passing momentum delta via separate arg
+
+    # Fatigue
+    if config.fatigue:
+        sets_played = state.sets_completed
+        if sets_played > 1:
+            fatigue_loss = FATIGUE_PER_SET * (sets_played - 1) * server.fatigue_resistance
+            p -= fatigue_loss
+
+    return max(0.05, min(0.95, p))
+
+
+# ---------------------------------------------------------------------------
+# Simulation helpers
+# ---------------------------------------------------------------------------
+
+def _simulate_point(
+    server: PlayerStats,
+    returner: PlayerStats,
+    config: MatchConfig,
+    state: MatchState,
+    is_tiebreak: bool = False,
+    is_pressure: bool = False,
+    server_on_streak: bool = False,
+    returner_on_streak: bool = False,
+) -> bool:
+    """Return True if the server wins the point."""
+    p = point_win_prob(server, returner, config, state, is_tiebreak, is_pressure)
+
+    if config.momentum:
+        if server_on_streak:
+            p = min(0.95, p + MOMENTUM_WEIGHT)
+        elif returner_on_streak:
+            p = max(0.05, p - MOMENTUM_WEIGHT)
+
+    return random.random() < p
+
+
+def _simulate_game(
+    server: PlayerStats,
+    returner: PlayerStats,
+    config: MatchConfig,
+    state: MatchState,
+    is_tiebreak: bool = False,
+) -> tuple[bool, int]:
+    """
+    Simulate one game (or tiebreak game).
 
     Returns:
-        dict with keys:
-            'player_a_win_prob': float (0-1)
-            'player_b_win_prob': float (0-1)
-            'details': breakdown of contributing factors
+        (server_won: bool, points_played: int)
     """
-    if surface not in SURFACES:
-        raise ValueError(f"Surface must be one of {SURFACES}, got '{surface}'")
+    if is_tiebreak:
+        # First to 7 points, win by 2
+        pts_server = 0
+        pts_returner = 0
+        total_points = 0
+        serve_switch = 0  # change server every 2 points after first point
 
-    # --- Elo-based probability ---
-    elo_a = player_a.combined_elo(surface)
-    elo_b = player_b.combined_elo(surface)
-    elo_prob_a = elo_expected(elo_a, elo_b)
+        while True:
+            # In a tiebreak, server alternates every 2 points
+            # Simplified: use the stats of whichever player is currently serving
+            # We model it as: current server wins with blended probability
+            # (each player serves ~half the points so we average their serve probs)
+            is_pressure = (pts_server >= 6 or pts_returner >= 6) and abs(pts_server - pts_returner) < 2
+            server_streak = state.streak_a >= MOMENTUM_STREAK_THRESHOLD
+            returner_streak = state.streak_b >= MOMENTUM_STREAK_THRESHOLD
 
-    # --- Form adjustment ---
-    form_a = player_a.recent_form()
-    form_b = player_b.recent_form()
-    form_total = form_a + form_b
-    form_prob_a = form_a / form_total if form_total > 0 else 0.5
+            server_wins_pt = _simulate_point(
+                server, returner, config, state,
+                is_tiebreak=True, is_pressure=is_pressure,
+                server_on_streak=server_streak,
+                returner_on_streak=returner_streak,
+            )
+            total_points += 1
 
-    # --- Head-to-head adjustment ---
-    h2h_prob_a = h2h.win_rate_a() if h2h else 0.5
+            if server_wins_pt:
+                pts_server += 1
+                state.streak_a += 1
+                state.streak_b = 0
+            else:
+                pts_returner += 1
+                state.streak_b += 1
+                state.streak_a = 0
 
-    # --- Blend probabilities ---
-    # Remaining weight after H2H is split between Elo and form
-    remaining = 1.0 - H2H_WEIGHT
-    elo_share = remaining * 0.75
-    form_share = remaining * 0.25
+            if pts_server >= 7 and pts_server - pts_returner >= 2:
+                return True, total_points
+            if pts_returner >= 7 and pts_returner - pts_server >= 2:
+                return False, total_points
+    else:
+        # Standard game: points 0-15-30-40, deuce/advantage
+        pts_server = 0
+        pts_returner = 0
+        total_points = 0
 
-    prob_a = elo_share * elo_prob_a + form_share * form_prob_a + H2H_WEIGHT * h2h_prob_a
-    prob_b = 1.0 - prob_a
+        while True:
+            # Is this a pressure point?
+            # Break point: server at 40-adv or 40-40 (deuce) and returner has advantage
+            # We define pressure as: server at 30-40, 0-40, 15-40, or returner has advantage
+            is_pressure = (
+                (pts_server < pts_returner and pts_returner >= 3) or
+                (pts_server >= 3 and pts_returner >= 3 and pts_returner >= pts_server)
+            )
+            server_streak = state.streak_a >= MOMENTUM_STREAK_THRESHOLD
+            returner_streak = state.streak_b >= MOMENTUM_STREAK_THRESHOLD
 
-    return {
-        "player_a_win_prob": round(prob_a, 4),
-        "player_b_win_prob": round(prob_b, 4),
-        "details": {
-            "elo_prob_a": round(elo_prob_a, 4),
-            "form_prob_a": round(form_prob_a, 4),
-            "h2h_prob_a": round(h2h_prob_a, 4),
-            "combined_elo_a": round(elo_a, 1),
-            "combined_elo_b": round(elo_b, 1),
-        },
-    }
+            server_wins_pt = _simulate_point(
+                server, returner, config, state,
+                is_tiebreak=False, is_pressure=is_pressure,
+                server_on_streak=server_streak,
+                returner_on_streak=returner_streak,
+            )
+            total_points += 1
+
+            if server_wins_pt:
+                pts_server += 1
+                state.streak_a += 1
+                state.streak_b = 0
+            else:
+                pts_returner += 1
+                state.streak_b += 1
+                state.streak_a = 0
+
+            # Win conditions
+            if pts_server >= 4 and pts_returner < 3:
+                return True, total_points
+            if pts_returner >= 4 and pts_server < 3:
+                return False, total_points
+            # Deuce/advantage: win by 2 from 3-3 onwards
+            if pts_server >= 3 and pts_returner >= 3:
+                if pts_server - pts_returner >= 2:
+                    return True, total_points
+                if pts_returner - pts_server >= 2:
+                    return False, total_points
 
 
-def update_ratings(
-    player_a: Player,
-    player_b: Player,
-    surface: str,
-    player_a_won: bool,
-    h2h: Optional[HeadToHead] = None,
-):
+def _simulate_set(
+    player_a: PlayerStats,
+    player_b: PlayerStats,
+    config: MatchConfig,
+    state: MatchState,
+    is_final_set: bool = False,
+    a_serves_first: bool = True,
+) -> tuple[int, int, int]:
     """
-    Update Elo ratings and head-to-head record after a match result.
+    Simulate one set.
+
+    Returns:
+        (games_a, games_b, total_points_played)
+    """
+    games_a = 0
+    games_b = 0
+    total_points = 0
+    a_serves = a_serves_first
+
+    while True:
+        # Determine if this game is a tiebreak
+        at_six_all = games_a == 6 and games_b == 6
+        is_tiebreak = at_six_all and (not is_final_set or config.final_set_tiebreak)
+
+        if a_serves:
+            server, returner = player_a, player_b
+        else:
+            server, returner = player_b, player_a
+
+        server_won, pts = _simulate_game(server, returner, config, state, is_tiebreak)
+        total_points += pts
+
+        if a_serves:
+            if server_won:
+                games_a += 1
+            else:
+                games_b += 1
+        else:
+            if server_won:
+                games_b += 1
+            else:
+                games_a += 1
+
+        a_serves = not a_serves  # alternate serve after each game
+
+        # Check set win conditions
+        # Standard: first to 6 with 2-game lead, or tiebreak at 6-6
+        if games_a >= 6 and games_a - games_b >= 2:
+            return games_a, games_b, total_points
+        if games_b >= 6 and games_b - games_a >= 2:
+            return games_a, games_b, total_points
+        if at_six_all:
+            # Tiebreak has already been played above; whoever won it has 7 games
+            # (this case is already caught by the 2-game-lead check above since 7-6 qualifies)
+            # For final set without tiebreak: keep playing until 2 clear
+            if not is_final_set or config.final_set_tiebreak:
+                # After a tiebreak the score is 7-6, already caught above
+                pass
+
+
+def simulate_match(
+    player_a: PlayerStats,
+    player_b: PlayerStats,
+    config: MatchConfig,
+    rng_seed: Optional[int] = None,
+) -> tuple[bool, tuple, int]:
+    """
+    Simulate a single match between player_a and player_b.
 
     Args:
-        player_a: First player.
-        player_b: Second player.
-        surface: Court surface.
-        player_a_won: True if player_a won.
-        h2h: Optional head-to-head tracker to update.
+        player_a:   First player.
+        player_b:   Second player.
+        config:     Match configuration.
+        rng_seed:   Optional seed for reproducibility.
+
+    Returns:
+        (player_a_won: bool, set_score: tuple of (sets_a, sets_b), total_games: int)
     """
-    if surface not in SURFACES:
-        raise ValueError(f"Surface must be one of {SURFACES}, got '{surface}'")
+    if rng_seed is not None:
+        random.seed(rng_seed)
 
-    # Overall Elo update
-    expected_a = elo_expected(player_a.elo, player_b.elo)
-    actual_a = 1.0 if player_a_won else 0.0
-    delta_a = K_FACTOR * (actual_a - expected_a)
+    sets_needed = (config.best_of // 2) + 1
+    state = MatchState()
 
-    # Surface Elo update
-    s_elo_a = player_a.surface_elo.get(surface, 1500.0)
-    s_elo_b = player_b.surface_elo.get(surface, 1500.0)
-    s_expected_a = elo_expected(s_elo_a, s_elo_b)
-    s_delta_a = K_FACTOR * (actual_a - s_expected_a)
+    sets_a = 0
+    sets_b = 0
+    total_games = 0
 
-    player_a.record_result(player_a_won, surface, delta_a, s_delta_a)
-    player_b.record_result(not player_a_won, surface, -delta_a, -s_delta_a)
+    # Coin toss: player A serves first in set 1 with 50% probability
+    a_serves_first_in_set = random.random() < 0.5
 
-    if h2h:
-        h2h.record_win(player_a_won)
+    while sets_a < sets_needed and sets_b < sets_needed:
+        is_final_set = (sets_a + sets_b) == config.best_of - 1
+        ga, gb, pts = _simulate_set(
+            player_a, player_b, config, state,
+            is_final_set=is_final_set,
+            a_serves_first=a_serves_first_in_set,
+        )
+        total_games += ga + gb
+
+        if ga > gb:
+            sets_a += 1
+        else:
+            sets_b += 1
+
+        state.sets_completed += 1
+
+        # Alternate which player serves first in each set
+        # (whoever broke/won the tiebreak to end the set determines serve order –
+        #  simplified here: just alternate)
+        a_serves_first_in_set = not a_serves_first_in_set
+
+    return sets_a > sets_b, (sets_a, sets_b), total_games
 
 
 # ---------------------------------------------------------------------------
-# Example usage
+# Monte Carlo runner
 # ---------------------------------------------------------------------------
+
+def run_simulation(
+    player_a: PlayerStats,
+    player_b: PlayerStats,
+    config: MatchConfig,
+    n_simulations: int = DEFAULT_SIMULATIONS,
+) -> SimulationResult:
+    """
+    Run n_simulations Monte Carlo match simulations and return aggregated stats.
+    """
+    wins_a = 0
+    wins_b = 0
+    set_dist: dict[tuple, int] = {}
+    game_counts: list[int] = []
+
+    for _ in range(n_simulations):
+        a_won, score, games = simulate_match(player_a, player_b, config)
+        if a_won:
+            wins_a += 1
+        else:
+            wins_b += 1
+
+        key = (score[0], score[1])
+        set_dist[key] = set_dist.get(key, 0) + 1
+        game_counts.append(games)
+
+    return SimulationResult(
+        player_a=player_a.name,
+        player_b=player_b.name,
+        surface=config.surface,
+        n_simulations=n_simulations,
+        wins_a=wins_a,
+        wins_b=wins_b,
+        set_distribution=set_dist,
+        avg_games=statistics.mean(game_counts),
+    )
+
+
+def head_to_head_breakdown(
+    player_a: PlayerStats,
+    player_b: PlayerStats,
+    n_simulations: int = DEFAULT_SIMULATIONS,
+) -> None:
+    """
+    Print win probability breakdown across all four surfaces and both match formats.
+    """
+    print(f"\n{'='*60}")
+    print(f"  HEAD-TO-HEAD BREAKDOWN")
+    print(f"  {player_a.name}  vs  {player_b.name}")
+    print(f"{'='*60}")
+    print(f"  {'Surface':<10} {'Format':<8} {player_a.name:<22} {player_b.name}")
+    print(f"  {'-'*54}")
+
+    for surface in ("hard", "clay", "grass", "carpet"):
+        for best_of in (3, 5):
+            cfg = MatchConfig(surface=surface, best_of=best_of)
+            result = run_simulation(player_a, player_b, cfg, n_simulations)
+            print(
+                f"  {surface:<10} Bo{best_of}      "
+                f"{result.win_prob_a*100:5.1f}%                "
+                f"{result.win_prob_b*100:5.1f}%"
+            )
+    print(f"{'='*60}\n")
+
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    # Create two players
-    djokovic = Player(name="Novak Djokovic", elo=2200.0)
-    djokovic.surface_elo["hard"] = 2250.0
-    djokovic.surface_elo["clay"] = 2150.0
+    # --- Define players with realistic ATP-tour statistics ---
+    djokovic = PlayerStats(
+        name="N. Djokovic",
+        first_serve_in=0.62,
+        first_serve_won=0.74,
+        second_serve_won=0.55,
+        return_adj=-0.06,      # elite returner (lowers opponent's serve-win prob)
+        tiebreak_bonus=0.04,
+        pressure_adj=0.03,     # mentally very strong
+        fatigue_resistance=0.7,  # very fit; fatigue hits him less
+    )
 
-    alcaraz = Player(name="Carlos Alcaraz", elo=2150.0)
-    alcaraz.surface_elo["hard"] = 2100.0
-    alcaraz.surface_elo["clay"] = 2200.0
+    alcaraz = PlayerStats(
+        name="C. Alcaraz",
+        first_serve_in=0.63,
+        first_serve_won=0.73,
+        second_serve_won=0.54,
+        return_adj=-0.05,
+        tiebreak_bonus=0.02,
+        pressure_adj=0.01,
+        fatigue_resistance=0.85,
+    )
 
-    # Simulate some prior results to establish form
-    for _ in range(8):
-        djokovic.match_history.append(True)
-    djokovic.match_history.extend([False, True])
+    nadal = PlayerStats(
+        name="R. Nadal",
+        first_serve_in=0.70,
+        first_serve_won=0.68,
+        second_serve_won=0.50,
+        return_adj=-0.07,      # best clay returner of all time
+        tiebreak_bonus=0.00,
+        pressure_adj=0.04,
+        fatigue_resistance=0.60,  # extreme fitness / clay sliding
+    )
 
-    for _ in range(7):
-        alcaraz.match_history.append(True)
-    alcaraz.match_history.extend([False, False, True])
+    medvedev = PlayerStats(
+        name="D. Medvedev",
+        first_serve_in=0.64,
+        first_serve_won=0.75,
+        second_serve_won=0.56,
+        return_adj=-0.04,
+        tiebreak_bonus=0.03,
+        pressure_adj=0.00,
+        fatigue_resistance=0.90,
+    )
 
-    # Head-to-head record
-    h2h = HeadToHead(wins_a=5, wins_b=3)
+    # --- Full simulation: Djokovic vs Alcaraz on hard, best of 5 ---
+    config = MatchConfig(surface="hard", best_of=5)
+    result = run_simulation(djokovic, alcaraz, config, n_simulations=50_000)
+    print(result.summary())
 
-    print("=== Tennis Match Prediction ===")
-    print(f"{djokovic.name} vs {alcaraz.name}\n")
+    # --- Clay: Nadal vs Alcaraz best of 5 ---
+    config_clay = MatchConfig(surface="clay", best_of=5)
+    result2 = run_simulation(nadal, alcaraz, config_clay, n_simulations=50_000)
+    print(result2.summary())
 
-    for surface in ["hard", "clay", "grass"]:
-        result = predict_match(djokovic, alcaraz, surface=surface, h2h=h2h)
-        print(f"Surface: {surface.upper()}")
-        print(f"  {djokovic.name}: {result['player_a_win_prob'] * 100:.1f}%")
-        print(f"  {alcaraz.name}:  {result['player_b_win_prob'] * 100:.1f}%")
-        d = result["details"]
-        print(f"  (Elo prob: {d['elo_prob_a']:.3f} | Form: {d['form_prob_a']:.3f} | H2H: {d['h2h_prob_a']:.3f})")
-        print()
-
-    # Record match result and see updated ratings
-    print("--- Recording a hard-court win for Alcaraz ---")
-    update_ratings(djokovic, alcaraz, surface="hard", player_a_won=False, h2h=h2h)
-    print(f"{djokovic.name} overall Elo: {djokovic.elo:.1f}")
-    print(f"{alcaraz.name} overall Elo:  {alcaraz.elo:.1f}")
-    print(f"H2H: {djokovic.name} {h2h.wins_a} - {h2h.wins_b} {alcaraz.name}")
+    # --- Full surface/format breakdown: Djokovic vs Medvedev ---
+    head_to_head_breakdown(djokovic, medvedev, n_simulations=10_000)
