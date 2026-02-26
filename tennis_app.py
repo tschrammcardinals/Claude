@@ -89,39 +89,100 @@ def run_parallel(player_a: PlayerStats, player_b: PlayerStats,
 # ---------------------------------------------------------------------------
 
 PRESETS: dict[str, dict] = {
-    "M. Kecmanovic": dict(name="M. Kecmanovic", first_serve_in=0.61, first_serve_won=0.71,
-                          second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.01,
-                          pressure_adj=-0.01, fatigue_resistance=0.95),
-    "S. Atmane":     dict(name="S. Atmane",     first_serve_in=0.60, first_serve_won=0.67,
-                          second_serve_won=0.50, return_adj=-0.01, tiebreak_bonus=0.00,
-                          pressure_adj=0.00,  fatigue_resistance=1.00),
-    "D. Medvedev":   dict(name="D. Medvedev",   first_serve_in=0.64, first_serve_won=0.75,
-                          second_serve_won=0.56, return_adj=-0.04, tiebreak_bonus=0.03,
-                          pressure_adj=0.00,  fatigue_resistance=0.90),
-    "J. Shang":      dict(name="J. Shang",      first_serve_in=0.62, first_serve_won=0.69,
-                          second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01,
-                          pressure_adj=-0.02, fatigue_resistance=0.92),
-    "N. Djokovic":   dict(name="N. Djokovic",   first_serve_in=0.62, first_serve_won=0.74,
-                          second_serve_won=0.55, return_adj=-0.06, tiebreak_bonus=0.04,
-                          pressure_adj=0.03,  fatigue_resistance=0.70),
-    "C. Alcaraz":    dict(name="C. Alcaraz",    first_serve_in=0.63, first_serve_won=0.73,
-                          second_serve_won=0.54, return_adj=-0.05, tiebreak_bonus=0.02,
-                          pressure_adj=0.01,  fatigue_resistance=0.85),
-    "R. Nadal":      dict(name="R. Nadal",      first_serve_in=0.70, first_serve_won=0.68,
-                          second_serve_won=0.50, return_adj=-0.07, tiebreak_bonus=0.00,
-                          pressure_adj=0.04,  fatigue_resistance=0.60),
-    "S. Tsitsipas":  dict(name="S. Tsitsipas",  first_serve_in=0.63, first_serve_won=0.73,
-                          second_serve_won=0.54, return_adj=-0.03, tiebreak_bonus=0.02,
-                          pressure_adj=-0.01, fatigue_resistance=0.88),
-    "A. Zverev":     dict(name="A. Zverev",     first_serve_in=0.62, first_serve_won=0.74,
-                          second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02,
-                          pressure_adj=-0.02, fatigue_resistance=0.90),
-    "V. Vacherot":   dict(name="V. Vacherot",   first_serve_in=0.73, first_serve_won=0.77,
-                          second_serve_won=0.53, return_adj=-0.01, tiebreak_bonus=0.04,
-                          pressure_adj=0.03,  fatigue_resistance=0.95),
-    "B. Nakashima":  dict(name="B. Nakashima",  first_serve_in=0.74, first_serve_won=0.79,
-                          second_serve_won=0.50, return_adj=0.02,  tiebreak_bonus=0.03,
-                          pressure_adj=0.01,  fatigue_resistance=0.92),
+    # ── Top of the tour ──────────────────────────────────────────────────────
+    "J. Sinner":              dict(name="J. Sinner",              first_serve_in=0.64, first_serve_won=0.76, second_serve_won=0.57, return_adj=-0.05, tiebreak_bonus=0.03, pressure_adj=0.02,  fatigue_resistance=0.85),
+    "C. Alcaraz":             dict(name="C. Alcaraz",             first_serve_in=0.63, first_serve_won=0.73, second_serve_won=0.54, return_adj=-0.05, tiebreak_bonus=0.02, pressure_adj=0.01,  fatigue_resistance=0.85),
+    "N. Djokovic":            dict(name="N. Djokovic",            first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.55, return_adj=-0.06, tiebreak_bonus=0.04, pressure_adj=0.03,  fatigue_resistance=0.70),
+    "A. Zverev":              dict(name="A. Zverev",              first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=-0.02, fatigue_resistance=0.90),
+    "D. Medvedev":            dict(name="D. Medvedev",            first_serve_in=0.64, first_serve_won=0.75, second_serve_won=0.56, return_adj=-0.04, tiebreak_bonus=0.03, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "A. Rublev":              dict(name="A. Rublev",              first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.55, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=-0.02, fatigue_resistance=0.88),
+    "C. Ruud":                dict(name="C. Ruud",                first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "S. Tsitsipas":           dict(name="S. Tsitsipas",           first_serve_in=0.63, first_serve_won=0.73, second_serve_won=0.54, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=-0.01, fatigue_resistance=0.88),
+    "H. Hurkacz":             dict(name="H. Hurkacz",             first_serve_in=0.63, first_serve_won=0.77, second_serve_won=0.54, return_adj=-0.04, tiebreak_bonus=0.03, pressure_adj=0.01,  fatigue_resistance=0.90),
+    "T. Fritz":               dict(name="T. Fritz",               first_serve_in=0.64, first_serve_won=0.76, second_serve_won=0.53, return_adj=-0.04, tiebreak_bonus=0.03, pressure_adj=0.01,  fatigue_resistance=0.92),
+    # ── Top 11–30 ────────────────────────────────────────────────────────────
+    "A. de Minaur":           dict(name="A. de Minaur",           first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.01,  fatigue_resistance=0.95),
+    "H. Rune":                dict(name="H. Rune",                first_serve_in=0.62, first_serve_won=0.72, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.01,  fatigue_resistance=0.88),
+    "B. Shelton":             dict(name="B. Shelton",             first_serve_in=0.61, first_serve_won=0.76, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "F. Auger-Aliassime":     dict(name="F. Auger-Aliassime",     first_serve_in=0.62, first_serve_won=0.75, second_serve_won=0.54, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "L. Musetti":             dict(name="L. Musetti",             first_serve_in=0.62, first_serve_won=0.71, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "G. Dimitrov":            dict(name="G. Dimitrov",            first_serve_in=0.63, first_serve_won=0.73, second_serve_won=0.54, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "S. Baez":                dict(name="S. Baez",                first_serve_in=0.65, first_serve_won=0.68, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "T. Paul":                dict(name="T. Paul",                first_serve_in=0.62, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "A. Bublik":              dict(name="A. Bublik",              first_serve_in=0.58, first_serve_won=0.77, second_serve_won=0.51, return_adj=-0.04, tiebreak_bonus=0.03, pressure_adj=-0.02, fatigue_resistance=0.88),
+    "K. Khachanov":           dict(name="K. Khachanov",           first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.54, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "U. Humbert":             dict(name="U. Humbert",             first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "J. Lehecka":             dict(name="J. Lehecka",             first_serve_in=0.63, first_serve_won=0.74, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "A. Davidovich Fokina":   dict(name="A. Davidovich Fokina",   first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "F. Cerundolo":           dict(name="F. Cerundolo",           first_serve_in=0.63, first_serve_won=0.71, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "F. Cobolli":             dict(name="F. Cobolli",             first_serve_in=0.62, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.93),
+    "T. Machac":              dict(name="T. Machac",              first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "M. Berrettini":          dict(name="M. Berrettini",          first_serve_in=0.63, first_serve_won=0.76, second_serve_won=0.55, return_adj=-0.04, tiebreak_bonus=0.03, pressure_adj=0.02,  fatigue_resistance=0.82),
+    "J. Mensik":              dict(name="J. Mensik",              first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.93),
+    "G. Mpetshi Perricard":   dict(name="G. Mpetshi Perricard",   first_serve_in=0.61, first_serve_won=0.79, second_serve_won=0.51, return_adj=-0.06, tiebreak_bonus=0.04, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "J. Draper":              dict(name="J. Draper",              first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.54, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.01,  fatigue_resistance=0.90),
+    # ── Top 31–60 ────────────────────────────────────────────────────────────
+    "A. Fils":                dict(name="A. Fils",                first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.92),
+    "N. Borges":              dict(name="N. Borges",              first_serve_in=0.64, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "J. Thompson":            dict(name="J. Thompson",            first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "A. Popyrin":             dict(name="A. Popyrin",             first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "M. Arnaldi":             dict(name="M. Arnaldi",             first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.92),
+    "F. Marozsan":            dict(name="F. Marozsan",            first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "J. Struff":              dict(name="J. Struff",              first_serve_in=0.63, first_serve_won=0.75, second_serve_won=0.52, return_adj=-0.04, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "Q. Halys":               dict(name="Q. Halys",               first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "T. Griekspoor":          dict(name="T. Griekspoor",          first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "R. Hijikata":            dict(name="R. Hijikata",            first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.93),
+    "L. Nardi":               dict(name="L. Nardi",               first_serve_in=0.62, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.93),
+    "L. Darderi":             dict(name="L. Darderi",             first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "M. Fucsovics":           dict(name="M. Fucsovics",           first_serve_in=0.64, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "N. Jarry":               dict(name="N. Jarry",               first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "A. Mannarino":           dict(name="A. Mannarino",           first_serve_in=0.68, first_serve_won=0.68, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.00, pressure_adj=0.01,  fatigue_resistance=0.92),
+    "G. Monfils":             dict(name="G. Monfils",             first_serve_in=0.61, first_serve_won=0.72, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.88),
+    "B. van de Zandschulp":   dict(name="B. van de Zandschulp",   first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "R. Bautista Agut":       dict(name="R. Bautista Agut",       first_serve_in=0.66, first_serve_won=0.70, second_serve_won=0.53, return_adj=-0.04, tiebreak_bonus=0.00, pressure_adj=0.02,  fatigue_resistance=0.88),
+    "D. Evans":               dict(name="D. Evans",               first_serve_in=0.66, first_serve_won=0.69, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.01,  fatigue_resistance=0.90),
+    "C. Eubanks":             dict(name="C. Eubanks",             first_serve_in=0.61, first_serve_won=0.76, second_serve_won=0.52, return_adj=-0.05, tiebreak_bonus=0.03, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "D. Thiem":               dict(name="D. Thiem",               first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.54, return_adj=-0.04, tiebreak_bonus=0.02, pressure_adj=0.01,  fatigue_resistance=0.85),
+    "D. Shapovalov":          dict(name="D. Shapovalov",          first_serve_in=0.60, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.02, pressure_adj=-0.02, fatigue_resistance=0.88),
+    "F. Tiafoe":              dict(name="F. Tiafoe",              first_serve_in=0.61, first_serve_won=0.73, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "A. Michelsen":           dict(name="A. Michelsen",           first_serve_in=0.62, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.93),
+    "S. Korda":               dict(name="S. Korda",               first_serve_in=0.62, first_serve_won=0.74, second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "M. McDonald":            dict(name="M. McDonald",            first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "A. Tabilo":              dict(name="A. Tabilo",              first_serve_in=0.63, first_serve_won=0.72, second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    # ── Top 61–100 ───────────────────────────────────────────────────────────
+    "B. Coric":               dict(name="B. Coric",               first_serve_in=0.63, first_serve_won=0.71, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "L. Djere":               dict(name="L. Djere",               first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "L. Sonego":              dict(name="L. Sonego",              first_serve_in=0.62, first_serve_won=0.72, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "C. O'Connell":           dict(name="C. O'Connell",           first_serve_in=0.63, first_serve_won=0.71, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "T. Kokkinakis":          dict(name="T. Kokkinakis",          first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "Z. Zhang":               dict(name="Z. Zhang",               first_serve_in=0.63, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "P. Kotov":               dict(name="P. Kotov",               first_serve_in=0.63, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "M. Giron":               dict(name="M. Giron",               first_serve_in=0.64, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "P. Martinez":            dict(name="P. Martinez",            first_serve_in=0.65, first_serve_won=0.69, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.01,  fatigue_resistance=0.90),
+    "M. Mmoh":                dict(name="M. Mmoh",                first_serve_in=0.61, first_serve_won=0.74, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "T. Etcheverry":          dict(name="T. Etcheverry",          first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "E. Ruusuvuori":          dict(name="E. Ruusuvuori",          first_serve_in=0.64, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "O. Otte":                dict(name="O. Otte",                first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "B. Bonzi":               dict(name="B. Bonzi",               first_serve_in=0.62, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "Y. Nishioka":            dict(name="Y. Nishioka",            first_serve_in=0.67, first_serve_won=0.68, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.00, pressure_adj=0.01,  fatigue_resistance=0.95),
+    "H. Mayot":               dict(name="H. Mayot",               first_serve_in=0.63, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=-0.01, fatigue_resistance=0.93),
+    "Z. Bergs":               dict(name="Z. Bergs",               first_serve_in=0.64, first_serve_won=0.70, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "A. Rinderknech":         dict(name="A. Rinderknech",         first_serve_in=0.61, first_serve_won=0.75, second_serve_won=0.52, return_adj=-0.04, tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "H. Medjedovic":          dict(name="H. Medjedovic",          first_serve_in=0.62, first_serve_won=0.71, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.93),
+    "E. Quinn":               dict(name="E. Quinn",               first_serve_in=0.62, first_serve_won=0.72, second_serve_won=0.52, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=0.93),
+    "R. Safiullin":           dict(name="R. Safiullin",           first_serve_in=0.62, first_serve_won=0.73, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.90),
+    "M. Kukushkin":           dict(name="M. Kukushkin",           first_serve_in=0.65, first_serve_won=0.69, second_serve_won=0.50, return_adj=-0.02, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "R. Albot":               dict(name="R. Albot",               first_serve_in=0.66, first_serve_won=0.68, second_serve_won=0.50, return_adj=-0.02, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.92),
+    "B. Zapata Miralles":     dict(name="B. Zapata Miralles",     first_serve_in=0.64, first_serve_won=0.69, second_serve_won=0.51, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=0.90),
+    "M. Cressy":              dict(name="M. Cressy",              first_serve_in=0.61, first_serve_won=0.78, second_serve_won=0.51, return_adj=-0.05, tiebreak_bonus=0.04, pressure_adj=0.00,  fatigue_resistance=0.88),
+    "S. Wawrinka":            dict(name="S. Wawrinka",            first_serve_in=0.63, first_serve_won=0.74, second_serve_won=0.56, return_adj=-0.03, tiebreak_bonus=0.02, pressure_adj=0.02,  fatigue_resistance=0.82),
+    # ── Special / others ─────────────────────────────────────────────────────
+    "M. Kecmanovic":          dict(name="M. Kecmanovic",          first_serve_in=0.61, first_serve_won=0.71, second_serve_won=0.53, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.01, fatigue_resistance=0.95),
+    "S. Atmane":              dict(name="S. Atmane",              first_serve_in=0.60, first_serve_won=0.67, second_serve_won=0.50, return_adj=-0.01, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=1.00),
+    "J. Shang":               dict(name="J. Shang",               first_serve_in=0.62, first_serve_won=0.69, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=-0.02, fatigue_resistance=0.92),
+    "V. Vacherot":            dict(name="V. Vacherot",            first_serve_in=0.73, first_serve_won=0.77, second_serve_won=0.53, return_adj=-0.01, tiebreak_bonus=0.04, pressure_adj=0.03,  fatigue_resistance=0.95),
+    "B. Nakashima":           dict(name="B. Nakashima",           first_serve_in=0.74, first_serve_won=0.79, second_serve_won=0.50, return_adj=0.02,  tiebreak_bonus=0.03, pressure_adj=0.01,  fatigue_resistance=0.92),
+    "R. Nadal":               dict(name="R. Nadal",               first_serve_in=0.70, first_serve_won=0.68, second_serve_won=0.50, return_adj=-0.07, tiebreak_bonus=0.00, pressure_adj=0.04,  fatigue_resistance=0.60),
 }
 
 
@@ -271,6 +332,20 @@ HTML = """<!DOCTYPE html>
   .error-box { background: #2d1515; border: 1px solid #7f1d1d; border-radius: var(--radius);
                padding: 16px 20px; color: #fca5a5; font-size: .88rem; }
 
+  /* Autocomplete preset */
+  .ac-wrap { position: relative; }
+  .ac-input { width: 100%; background: #252836; border: 1px solid var(--border);
+              color: var(--text); border-radius: 6px; padding: 6px 10px; font-size: .875rem;
+              outline: none; }
+  .ac-input:focus { border-color: var(--accent); }
+  .ac-list { position: absolute; z-index: 200; left: 0; right: 0; top: 100%;
+             max-height: 220px; overflow-y: auto;
+             background: #252836; border: 1px solid var(--accent);
+             border-top: none; border-radius: 0 0 6px 6px;
+             display: none; }
+  .ac-item { padding: 7px 10px; cursor: pointer; font-size: .875rem; color: var(--text); }
+  .ac-item:hover, .ac-item.ac-active { background: #1e3a8a; color: #93c5fd; }
+
   @media (max-width: 700px) {
     .players { grid-template-columns: 1fr; }
     .prob-grid { grid-template-columns: 1fr; }
@@ -297,7 +372,12 @@ HTML = """<!DOCTYPE html>
       <h2><span class="badge-a">A</span> Player A</h2>
       <div class="field">
         <label>Preset</label>
-        <select id="presetA" onchange="loadPreset('A')"><option value="">— select preset —</option></select>
+        <div class="ac-wrap" id="acWrapA">
+          <input type="text" class="ac-input" id="presetA" placeholder="Search player…"
+                 autocomplete="off"
+                 oninput="acFilter('A')" onfocus="acOpen('A')" onkeydown="acKey(event,'A')">
+          <div class="ac-list" id="acListA"></div>
+        </div>
       </div>
       <div class="field">
         <label>Name</label>
@@ -365,7 +445,12 @@ HTML = """<!DOCTYPE html>
       <h2><span class="badge-b">B</span> Player B</h2>
       <div class="field">
         <label>Preset</label>
-        <select id="presetB" onchange="loadPreset('B')"><option value="">— select preset —</option></select>
+        <div class="ac-wrap" id="acWrapB">
+          <input type="text" class="ac-input" id="presetB" placeholder="Search player…"
+                 autocomplete="off"
+                 oninput="acFilter('B')" onfocus="acOpen('B')" onkeydown="acKey(event,'B')">
+          <div class="ac-list" id="acListB"></div>
+        </div>
       </div>
       <div class="field">
         <label>Name</label>
@@ -504,16 +589,6 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('coreLabel').textContent = `${d.cores} CPU cores · parallel`;
   });
 
-  const names = Object.keys(PRESETS);
-  ['A', 'B'].forEach(p => {
-    const sel = document.getElementById('preset' + p);
-    names.forEach(n => {
-      const opt = document.createElement('option');
-      opt.value = n; opt.textContent = n;
-      sel.appendChild(opt);
-    });
-  });
-
   // init toggle classes
   document.querySelectorAll('.toggle input').forEach(cb => {
     cb.parentElement.classList.toggle('active', cb.checked);
@@ -540,8 +615,8 @@ function selectRadio(groupId, el, value) {
   else cfg.best_of = value;
 }
 
-function loadPreset(p) {
-  const key  = document.getElementById('preset' + p).value;
+function loadPreset(p, key) {
+  if (!key) key = document.getElementById('preset' + p).value;
   if (!key) return;
   const data = PRESETS[key];
   if (!data) return;
@@ -577,6 +652,64 @@ function getPlayer(p) {
 }
 
 function ck(id) { return document.querySelector('#tog_' + id + ' input').checked; }
+
+// ── Autocomplete preset ────────────────────────────────────────────────────
+const PRESET_NAMES = Object.keys(PRESETS);
+
+function _escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function acOpen(p) { acFilter(p); }
+
+function acFilter(p) {
+  const input   = document.getElementById('preset' + p);
+  const list    = document.getElementById('acList' + p);
+  const q       = input.value.trim().toLowerCase();
+  const matches = q ? PRESET_NAMES.filter(n => n.toLowerCase().includes(q)) : PRESET_NAMES;
+  if (!matches.length) { list.style.display = 'none'; return; }
+  list.innerHTML = matches.map(n =>
+    `<div class="ac-item" data-name="${_escHtml(n)}" onclick="acPick(this,'${p}')">${_escHtml(n)}</div>`
+  ).join('');
+  list.style.display = 'block';
+}
+
+function acPick(el, p) {
+  document.getElementById('preset' + p).value = el.dataset.name;
+  document.getElementById('acList' + p).style.display = 'none';
+  loadPreset(p, el.dataset.name);
+}
+
+function acKey(e, p) {
+  const list  = document.getElementById('acList' + p);
+  if (list.style.display === 'none') { if (e.key === 'ArrowDown') acOpen(p); return; }
+  const items = list.querySelectorAll('.ac-item');
+  let   act   = list.querySelector('.ac-item.ac-active');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (!act) items[0]?.classList.add('ac-active');
+    else { act.classList.remove('ac-active'); (act.nextElementSibling || items[0]).classList.add('ac-active'); }
+    list.querySelector('.ac-active')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!act) items[items.length-1]?.classList.add('ac-active');
+    else { act.classList.remove('ac-active'); (act.previousElementSibling || items[items.length-1]).classList.add('ac-active'); }
+    list.querySelector('.ac-active')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    if (act) acPick(act, p);
+    else list.style.display = 'none';
+  } else if (e.key === 'Escape') {
+    list.style.display = 'none';
+  }
+}
+
+document.addEventListener('click', e => {
+  ['A','B'].forEach(p => {
+    const wrap = document.getElementById('acWrap' + p);
+    if (wrap && !wrap.contains(e.target))
+      document.getElementById('acList' + p).style.display = 'none';
+  });
+});
 
 // ── Run simulation ─────────────────────────────────────────────────────────
 async function runSim() {
