@@ -579,6 +579,35 @@ if __name__ == "__main__":
 
     head_to_head_breakdown(kecmanovic, atmane, n_simulations=10_000)
 
+    # --- Medvedev vs Shang ---
+    shang = PlayerStats(
+        name="J. Shang",
+        first_serve_in=0.62,
+        first_serve_won=0.69,
+        second_serve_won=0.51,
+        return_adj=-0.02,      # quick learner, solid from the back
+        tiebreak_bonus=0.01,
+        pressure_adj=-0.02,    # young; can struggle in tight moments
+        fatigue_resistance=0.92,
+    )
+
+    medvedev = PlayerStats(
+        name="D. Medvedev",
+        first_serve_in=0.64,
+        first_serve_won=0.75,
+        second_serve_won=0.56,
+        return_adj=-0.04,
+        tiebreak_bonus=0.03,
+        pressure_adj=0.00,
+        fatigue_resistance=0.90,
+    )
+
+    config_med = MatchConfig(surface="hard", best_of=3)
+    result_med = run_simulation(medvedev, shang, config_med, n_simulations=50_000)
+    print(result_med.summary())
+
+    head_to_head_breakdown(medvedev, shang, n_simulations=10_000)
+
     # --- Define players with realistic ATP-tour statistics ---
     djokovic = PlayerStats(
         name="N. Djokovic",
