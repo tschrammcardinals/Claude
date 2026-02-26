@@ -183,6 +183,17 @@ PRESETS: dict[str, dict] = {
     "V. Vacherot":            dict(name="V. Vacherot",            first_serve_in=0.73, first_serve_won=0.77, second_serve_won=0.53, return_adj=-0.01, tiebreak_bonus=0.04, pressure_adj=0.03,  fatigue_resistance=0.95),
     "B. Nakashima":           dict(name="B. Nakashima",           first_serve_in=0.74, first_serve_won=0.79, second_serve_won=0.50, return_adj=0.02,  tiebreak_bonus=0.03, pressure_adj=0.01,  fatigue_resistance=0.92),
     "R. Nadal":               dict(name="R. Nadal",               first_serve_in=0.70, first_serve_won=0.68, second_serve_won=0.50, return_adj=-0.07, tiebreak_bonus=0.00, pressure_adj=0.04,  fatigue_resistance=0.60),
+    # ── Saint-Brieuc Challenger 2026 (indoor hard) ───────────────────────────
+    # Stats sourced from TennisRatio / ATP Stats Centre, updated Feb 2026
+    "L. Lokoli":              dict(name="L. Lokoli",              first_serve_in=0.63, first_serve_won=0.70, second_serve_won=0.46, return_adj=-0.02, tiebreak_bonus=0.00, pressure_adj=-0.01, fatigue_resistance=1.00),
+    "C. Chidekh":             dict(name="C. Chidekh",             first_serve_in=0.62, first_serve_won=0.69, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.01, pressure_adj=0.01,  fatigue_resistance=0.95),
+    "S. Ofner":               dict(name="S. Ofner",               first_serve_in=0.55, first_serve_won=0.77, second_serve_won=0.49, return_adj=0.02,  tiebreak_bonus=0.02, pressure_adj=0.00,  fatigue_resistance=0.95),
+    "M. Martineau":           dict(name="M. Martineau",           first_serve_in=0.65, first_serve_won=0.74, second_serve_won=0.48, return_adj=-0.01, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=1.00),
+    "P-H. Herbert":           dict(name="P-H. Herbert",           first_serve_in=0.59, first_serve_won=0.78, second_serve_won=0.49, return_adj=0.00,  tiebreak_bonus=0.03, pressure_adj=0.01,  fatigue_resistance=0.95),
+    "U. Blanchet":            dict(name="U. Blanchet",            first_serve_in=0.54, first_serve_won=0.74, second_serve_won=0.52, return_adj=-0.01, tiebreak_bonus=0.01, pressure_adj=0.00,  fatigue_resistance=1.00),
+    "H. Gaston":              dict(name="H. Gaston",              first_serve_in=0.57, first_serve_won=0.73, second_serve_won=0.51, return_adj=-0.02, tiebreak_bonus=0.01, pressure_adj=0.01,  fatigue_resistance=0.95),
+    "L. Poullain":            dict(name="L. Poullain",            first_serve_in=0.67, first_serve_won=0.64, second_serve_won=0.52, return_adj=-0.03, tiebreak_bonus=0.00, pressure_adj=0.00,  fatigue_resistance=1.00),
+    "T. Droguet":             dict(name="T. Droguet",             first_serve_in=0.61, first_serve_won=0.78, second_serve_won=0.53, return_adj=-0.01, tiebreak_bonus=0.01, pressure_adj=0.01,  fatigue_resistance=0.95),
 }
 
 
