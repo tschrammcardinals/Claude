@@ -116,6 +116,12 @@ PRESETS: dict[str, dict] = {
     "A. Zverev":     dict(name="A. Zverev",     first_serve_in=0.62, first_serve_won=0.74,
                           second_serve_won=0.53, return_adj=-0.03, tiebreak_bonus=0.02,
                           pressure_adj=-0.02, fatigue_resistance=0.90),
+    "V. Vacherot":   dict(name="V. Vacherot",   first_serve_in=0.73, first_serve_won=0.77,
+                          second_serve_won=0.53, return_adj=-0.01, tiebreak_bonus=0.04,
+                          pressure_adj=0.03,  fatigue_resistance=0.95),
+    "B. Nakashima":  dict(name="B. Nakashima",  first_serve_in=0.74, first_serve_won=0.79,
+                          second_serve_won=0.50, return_adj=0.02,  tiebreak_bonus=0.03,
+                          pressure_adj=0.01,  fatigue_resistance=0.92),
 }
 
 
