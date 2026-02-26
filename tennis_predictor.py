@@ -550,6 +550,35 @@ def head_to_head_breakdown(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # --- Kecmanovic vs Atmane ---
+    kecmanovic = PlayerStats(
+        name="M. Kecmanovic",
+        first_serve_in=0.61,
+        first_serve_won=0.71,
+        second_serve_won=0.53,
+        return_adj=-0.02,      # solid baseline returner
+        tiebreak_bonus=0.01,
+        pressure_adj=-0.01,    # can lose focus in tight moments
+        fatigue_resistance=0.95,
+    )
+
+    atmane = PlayerStats(
+        name="S. Atmane",
+        first_serve_in=0.60,
+        first_serve_won=0.67,
+        second_serve_won=0.50,
+        return_adj=-0.01,
+        tiebreak_bonus=0.00,
+        pressure_adj=0.00,
+        fatigue_resistance=1.0,
+    )
+
+    config_kec = MatchConfig(surface="hard", best_of=3)
+    result_kec = run_simulation(kecmanovic, atmane, config_kec, n_simulations=50_000)
+    print(result_kec.summary())
+
+    head_to_head_breakdown(kecmanovic, atmane, n_simulations=10_000)
+
     # --- Define players with realistic ATP-tour statistics ---
     djokovic = PlayerStats(
         name="N. Djokovic",
