@@ -119,11 +119,11 @@ class SimulationResult:
 
     @property
     def win_prob_a(self) -> float:
-        return self.wins_a / self.n_simulations
+        return max(0.01, min(0.99, self.wins_a / self.n_simulations))
 
     @property
     def win_prob_b(self) -> float:
-        return self.wins_b / self.n_simulations
+        return max(0.01, min(0.99, self.wins_b / self.n_simulations))
 
     def summary(self) -> str:
         lines = [
@@ -407,6 +407,7 @@ _ELO_REF_RANK = 150
 _SKILL_ADJ_PER_ELO = 0.000251
 
 _STAT_LOOKBACK = 20
+_SACKMANN_MIN_MATCHES = 10  # blend with ATP averages when sample is thinner
 
 
 def _normalize(name: str) -> str:
@@ -674,12 +675,23 @@ def _sackmann_serve_stats(name: str) -> dict:
     def ratio(n: str, d: str, default: float) -> float:
         return acc[n] / acc[d] if acc[d] else default
 
-    return {
+    stats = {
         "first_serve_in":   ratio("fs_in",  "fs_in_tot",  _ATP_AVG_FIRST_SERVE_IN),
         "first_serve_won":  ratio("fs_won",  "fs_won_tot", _ATP_AVG_FIRST_SERVE_WON),
         "second_serve_won": ratio("ss_won",  "ss_won_tot", _ATP_AVG_SECOND_SERVE_WON),
         "return_won":       ratio("ret_won", "ret_tot",    _ATP_AVG_RETURN_WON),
     }
+    n_matches = len(matches[:_STAT_LOOKBACK])
+    if n_matches < _SACKMANN_MIN_MATCHES:
+        w = n_matches / _SACKMANN_MIN_MATCHES
+        atp = {
+            "first_serve_in":   _ATP_AVG_FIRST_SERVE_IN,
+            "first_serve_won":  _ATP_AVG_FIRST_SERVE_WON,
+            "second_serve_won": _ATP_AVG_SECOND_SERVE_WON,
+            "return_won":       _ATP_AVG_RETURN_WON,
+        }
+        return {k: w * stats[k] + (1 - w) * atp[k] for k in stats}
+    return stats
 
 
 # ---------------------------------------------------------------------------
