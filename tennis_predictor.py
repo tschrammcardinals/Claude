@@ -850,14 +850,76 @@ def predict_match_by_name(
     return run_simulation(player_a, player_b, config, n_simulations)
 
 
+def player_stats_from_sofascore_id(team_id: int, name: str) -> PlayerStats:
+    """Build a :class:`PlayerStats` directly from a known SofaScore team ID."""
+    raw     = _aggregate_recent_stats(team_id)
+    ranking = _fetch_atp_ranking(team_id)
+
+    skill_adj  = _ranking_to_skill_adj(ranking) if ranking else 0.0
+    return_adj = _ATP_AVG_RETURN_WON - raw["return_won"]
+
+    print(
+        f"  [SofaScore] {name}: "
+        f"rank={ranking or '?'}, "
+        f"fs_in={raw['first_serve_in']:.3f}, "
+        f"fs_won={raw['first_serve_won']:.3f}, "
+        f"ss_won={raw['second_serve_won']:.3f}, "
+        f"ret_won={raw['return_won']:.3f}, "
+        f"skill_adj={skill_adj:+.4f}"
+    )
+
+    return PlayerStats(
+        name=name,
+        first_serve_in=max(0.40, min(0.80, raw["first_serve_in"])),
+        first_serve_won=max(0.50, min(0.90, raw["first_serve_won"])),
+        second_serve_won=max(0.35, min(0.70, raw["second_serve_won"])),
+        return_adj=max(-0.15, min(0.10, return_adj)),
+        skill_adj=max(-0.12, min(0.12, skill_adj)),
+    )
+
+
+def predict_match_by_id(
+    player_a_id: int,
+    player_a_name: str,
+    player_b_id: int,
+    player_b_name: str,
+    config: MatchConfig,
+    n_simulations: int = DEFAULT_SIMULATIONS,
+) -> SimulationResult:
+    """Predict a match outcome by SofaScore team IDs (bypasses name search)."""
+    player_a = player_stats_from_sofascore_id(player_a_id, player_a_name)
+    player_b = player_stats_from_sofascore_id(player_b_id, player_b_name)
+    return run_simulation(player_a, player_b, config, n_simulations)
+
+
 # ---------------------------------------------------------------------------
 # Demo
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # --- Live prediction using SofaScore stats (fetched at runtime) ---
-    print("Fetching SofaScore stats for Blanch vs Prizmic...")
+    import sys as _sys
     live_cfg = MatchConfig(surface="hard", best_of=3)
+
+    # Usage: tennis_predictor.py <id_a> <id_b>
+    #   or:  tennis_predictor.py <id_a> "Name A" <id_b> "Name B"
+    if len(_sys.argv) >= 3:
+        _id_a = int(_sys.argv[1])
+        if len(_sys.argv) >= 5:
+            _name_a = _sys.argv[2]
+            _id_b   = int(_sys.argv[3])
+            _name_b = _sys.argv[4]
+        else:
+            _id_a   = int(_sys.argv[1])
+            _id_b   = int(_sys.argv[2])
+            _name_a = f"Player {_id_a}"
+            _name_b = f"Player {_id_b}"
+        print(f"Fetching SofaScore stats for {_name_a} vs {_name_b}...")
+        live_result = predict_match_by_id(_id_a, _name_a, _id_b, _name_b, live_cfg)
+        print(live_result.summary())
+        _sys.exit(0)
+
+    # --- Default demo: Blanch vs Prizmic ---
+    print("Fetching SofaScore stats for Blanch vs Prizmic...")
     live_result = predict_match_by_name("Darwin Blanch", "Dino Prizmic", live_cfg)
     print(live_result.summary())
 
