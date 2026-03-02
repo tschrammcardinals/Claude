@@ -1,9 +1,54 @@
+import os
+
 import streamlit as st
+
 from tennis_predictor import predict_match_by_name, MatchConfig
 
 st.set_page_config(page_title="Tennis Match Predictor", layout="centered")
 st.title("Tennis Match Predictor")
-st.caption("Powered by Sackmann tennis_atp data · Monte Carlo simulation · Hard court")
+
+# ---------------------------------------------------------------------------
+# Sidebar — API key
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.header("Data source")
+
+    # Prefer key already in the environment / st.secrets.
+    env_key = os.environ.get("RAPIDAPI_KEY") or st.secrets.get("RAPIDAPI_KEY", "") if hasattr(st, "secrets") else ""
+    if not env_key:
+        # Let the user paste it in directly.
+        env_key = ""
+
+    api_key_input = st.text_input(
+        "RapidAPI key",
+        value=env_key,
+        type="password",
+        help=(
+            "Paste your key from rapidapi.com/jjrm365-kIFr3Nx_odV/api/tennis-api-atp-wta-itf  \n"
+            "Free tier (~500 req/month) is enough for normal use.  \n"
+            "Leave blank to fall back to Sackmann 2024 data."
+        ),
+    )
+
+    if api_key_input:
+        st.success("Live 2025/2026 data (RapidAPI)")
+        resolved_key: str | None = api_key_input
+    else:
+        st.warning("No key — using Sackmann 2024 data")
+        resolved_key = None
+
+    st.divider()
+    st.caption(
+        "Data: [API-Tennis (RapidAPI)](https://rapidapi.com/jjrm365-kIFr3Nx_odV/api/tennis-api-atp-wta-itf) "
+        "· fallback: [Sackmann tennis_atp](https://github.com/JeffSackmann/tennis_atp)"
+    )
+
+# ---------------------------------------------------------------------------
+# Main form
+# ---------------------------------------------------------------------------
+
+st.caption("Monte Carlo point-by-point simulation")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -18,7 +63,7 @@ if st.button("Run Simulation", type="primary", disabled=not (player_a and player
     with st.spinner(f"Fetching stats and simulating {player_a} vs {player_b}..."):
         cfg = MatchConfig(surface=surface, best_of=best_of)
         try:
-            result = predict_match_by_name(player_a, player_b, cfg)
+            result = predict_match_by_name(player_a, player_b, cfg, api_key=resolved_key)
         except Exception as e:
             st.error(f"Error: {e}")
             st.stop()
