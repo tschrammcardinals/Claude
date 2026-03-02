@@ -15,9 +15,13 @@ Player statistics drive point-win probabilities, adjusted for:
 Run `python tennis_predictor.py` to see a demo.
 """
 
+import json
 import math
 import random
 import statistics
+import unicodedata
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -84,6 +88,7 @@ class PlayerStats:
     tiebreak_bonus: float = 0.02
     pressure_adj: float = 0.0
     fatigue_resistance: float = 1.0
+    skill_adj: float = 0.0   # additive serve-win boost from overall Elo/win-rate signal
 
 
 @dataclass
@@ -192,8 +197,8 @@ def base_serve_win_prob(server: PlayerStats, returner: PlayerStats, surface: str
     # Blend: first serve goes in with probability server.first_serve_in
     raw = server.first_serve_in * p1 + (1 - server.first_serve_in) * p2
 
-    # Apply surface and returner quality
-    adjusted = raw * mult + returner.return_adj
+    # Apply surface, returner quality, and server's overall skill level
+    adjusted = raw * mult + returner.return_adj + server.skill_adj
 
     return max(0.05, min(0.95, adjusted))
 
@@ -546,10 +551,268 @@ def head_to_head_breakdown(
 
 
 # ---------------------------------------------------------------------------
+# SofaScore integration
+# ---------------------------------------------------------------------------
+
+_SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+# SofaScore's CDN requires this exact UA; browser UAs receive a 500 from this
+# server environment (Fastly blocks non-browser IPs using browser UAs).
+_SOFASCORE_UA = "curl/8.4.0"
+
+# ATP-tour averages used as fallback defaults and for normalisation.
+_ATP_AVG_FIRST_SERVE_IN   = 0.62
+_ATP_AVG_FIRST_SERVE_WON  = 0.72
+_ATP_AVG_SECOND_SERVE_WON = 0.52
+_ATP_AVG_RETURN_WON       = 0.385
+
+# Ranking → Elo formula:  Elo(rank) = _ELO_BASE - _ELO_SCALE * log10(rank)
+# Calibrated so that rank-60 vs rank-287 gives ≈74 % win prob — matching the
+# sportsbook odds that motivated this feature.
+_ELO_BASE  = 1600.0
+_ELO_SCALE = 268.0
+_ELO_REF_RANK = 150   # ATP rank treated as "average tour player" (skill_adj = 0)
+
+# Derived constant: skill_adj per Elo point above/below the reference.
+# From simulation: Δskill_adj = 0.04 → ≈21 pp match-win shift (slope ≈ 5.25).
+# Matching rank-60 vs rank-287 (ΔElo ≈ 182) to the 74 % target requires
+# Δskill_adj ≈ 0.0457, giving factor = 0.0457 / 182 ≈ 0.000251.
+_SKILL_ADJ_PER_ELO = 0.000251
+
+# How many recent matches to aggregate serve/return stats from.
+_STAT_LOOKBACK = 20
+
+
+def _sofascore_get(path: str) -> Optional[dict]:
+    """GET a SofaScore API path and return the parsed JSON, or None on failure."""
+    url = _SOFASCORE_BASE + path
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _SOFASCORE_UA, "Accept": "*/*"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _find_team_id(player_name: str) -> Optional[int]:
+    """
+    Find a player's SofaScore team ID by scanning recent scheduled events.
+
+    SofaScore's /search endpoint is unreliable from server environments;
+    scanning dated event lists is more robust.  Uses a tiered step size:
+    every 2 days for the first 90 days, then every 7 days up to 400 days,
+    to stay fast while still catching players who have been absent months.
+
+    Args:
+        player_name: Full or partial player name (case-insensitive).
+
+    Returns:
+        The integer team ID, or None if not found within ~400 days.
+    """
+    import datetime
+
+    name_lower = player_name.lower()
+    today = datetime.date.today()
+
+    def _ascii(s: str) -> str:
+        """Strip diacritics so 'Prižmić' matches 'Prizmic'."""
+        return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode().lower()
+
+    name_ascii = _ascii(player_name)
+
+    def _scan(start: int, stop: int, step: int) -> Optional[int]:
+        for delta in range(start, stop, step):
+            date_str = (today - datetime.timedelta(days=delta)).strftime("%Y-%m-%d")
+            data = _sofascore_get(f"/sport/tennis/scheduled-events/{date_str}")
+            if not data:
+                continue
+            for ev in data.get("events", []):
+                for side in ("homeTeam", "awayTeam"):
+                    team = ev.get(side, {})
+                    if name_ascii in _ascii(team.get("name", "")):
+                        return team["id"]
+        return None
+
+    return _scan(0, 90, 2) or _scan(90, 400, 7)
+
+
+def _aggregate_recent_stats(team_id: int, n_matches: int = _STAT_LOOKBACK) -> dict:
+    """
+    Aggregate serve/return statistics and win-rate from the player's recent matches.
+
+    Returns a dict with keys:
+        first_serve_in, first_serve_won, second_serve_won, return_won  (fractions)
+        wins, losses  (int)
+    Falls back to ATP averages for any stat with insufficient data.
+    """
+    events_data = _sofascore_get(f"/team/{team_id}/events/last/0")
+    events = (events_data or {}).get("events", [])
+
+    acc: dict = {k: 0 for k in (
+        "fs_in", "fs_in_tot",
+        "fs_won", "fs_won_tot",
+        "ss_won", "ss_won_tot",
+        "ret_won", "ret_tot",
+        "wins", "losses",
+    )}
+
+    for ev in events[:n_matches]:
+        status = ev.get("status", {})
+        if status.get("type") != "finished":
+            continue
+
+        is_home = ev.get("homeTeam", {}).get("id") == team_id
+        winner_code = ev.get("winnerCode")
+        if winner_code == 1:
+            acc["wins" if is_home else "losses"] += 1
+        elif winner_code == 2:
+            acc["losses" if is_home else "wins"] += 1
+
+        stats_data = _sofascore_get(f"/event/{ev['id']}/statistics")
+        if not stats_data:
+            continue
+
+        for period in stats_data.get("statistics", []):
+            if period.get("period") != "ALL":
+                continue
+            for group in period.get("groups", []):
+                for item in group.get("statisticsItems", []):
+                    k = item.get("key")
+                    hv = item.get("homeValue") or 0
+                    av = item.get("awayValue") or 0
+                    ht = item.get("homeTotal")
+                    at = item.get("awayTotal")
+                    mv, mt = (hv, ht) if is_home else (av, at)
+                    if not mt:
+                        continue
+                    if k == "firstServeAccuracy":
+                        acc["fs_in"] += mv;  acc["fs_in_tot"] += mt
+                    elif k == "firstServePointsAccuracy":
+                        acc["fs_won"] += mv; acc["fs_won_tot"] += mt
+                    elif k == "secondServePointsAccuracy":
+                        acc["ss_won"] += mv; acc["ss_won_tot"] += mt
+                    elif k in ("firstReturnPoints", "secondReturnPoints"):
+                        acc["ret_won"] += mv; acc["ret_tot"] += mt
+
+    def ratio(num_key: str, den_key: str, default: float) -> float:
+        d = acc[den_key]
+        return acc[num_key] / d if d else default
+
+    return {
+        "first_serve_in":   ratio("fs_in",  "fs_in_tot",  _ATP_AVG_FIRST_SERVE_IN),
+        "first_serve_won":  ratio("fs_won",  "fs_won_tot", _ATP_AVG_FIRST_SERVE_WON),
+        "second_serve_won": ratio("ss_won",  "ss_won_tot", _ATP_AVG_SECOND_SERVE_WON),
+        "return_won":       ratio("ret_won", "ret_tot",    _ATP_AVG_RETURN_WON),
+        "wins":  acc["wins"],
+        "losses": acc["losses"],
+    }
+
+
+def _fetch_atp_ranking(team_id: int) -> Optional[int]:
+    """Return the current ATP singles ranking for *team_id*, or None if unavailable."""
+    data = _sofascore_get(f"/team/{team_id}/rankings")
+    if not data:
+        return None
+    for entry in data.get("rankings", []):
+        # type=5 is the ATP singles ranking on SofaScore.
+        if entry.get("type") == 5:
+            return entry.get("ranking")
+    # Fall back to first available ranking entry.
+    rankings = data.get("rankings", [])
+    return rankings[0].get("ranking") if rankings else None
+
+
+def _ranking_to_elo(ranking: int) -> float:
+    """Convert an ATP ranking position to an Elo rating using the calibrated formula."""
+    ranking = max(1, ranking)
+    return _ELO_BASE - _ELO_SCALE * math.log10(ranking)
+
+
+def _ranking_to_skill_adj(ranking: int) -> float:
+    """
+    Convert an ATP ranking into a ``skill_adj`` value relative to the reference rank.
+
+    A player at ``_ELO_REF_RANK`` gets 0.0.  Better-ranked players get a positive
+    adjustment (higher serve-win probability); worse-ranked get a negative one.
+    The calibration ensures that a rank-60 player vs a rank-287 player produces
+    approximately the 74 % / 26 % match-win probabilities seen in sportsbook odds.
+    """
+    elo = _ranking_to_elo(ranking)
+    elo_ref = _ranking_to_elo(_ELO_REF_RANK)
+    return _SKILL_ADJ_PER_ELO * (elo - elo_ref)
+
+
+def player_stats_from_sofascore(name: str) -> PlayerStats:
+    """
+    Build a :class:`PlayerStats` for *name* using live SofaScore data.
+
+    Aggregates serve/return percentages from recent matches for the mechanical
+    serve model, then derives ``skill_adj`` from the player's ATP ranking so
+    that the simulation reflects true player quality differences — not just
+    serve statistics, which are too similar across tour-level players to
+    differentiate well-ranked from lower-ranked players.
+    """
+    team_id = _find_team_id(name)
+    if team_id is None:
+        print(f"  [SofaScore] Could not find team ID for '{name}' — using defaults.")
+        return PlayerStats(name=name)
+
+    raw     = _aggregate_recent_stats(team_id)
+    ranking = _fetch_atp_ranking(team_id)
+
+    skill_adj = _ranking_to_skill_adj(ranking) if ranking else 0.0
+    return_adj = _ATP_AVG_RETURN_WON - raw["return_won"]
+
+    print(
+        f"  [SofaScore] {name}: "
+        f"rank={ranking or '?'}, "
+        f"fs_in={raw['first_serve_in']:.3f}, "
+        f"fs_won={raw['first_serve_won']:.3f}, "
+        f"ss_won={raw['second_serve_won']:.3f}, "
+        f"ret_won={raw['return_won']:.3f}, "
+        f"skill_adj={skill_adj:+.4f}"
+    )
+
+    return PlayerStats(
+        name=name,
+        first_serve_in=max(0.40, min(0.80, raw["first_serve_in"])),
+        first_serve_won=max(0.50, min(0.90, raw["first_serve_won"])),
+        second_serve_won=max(0.35, min(0.70, raw["second_serve_won"])),
+        return_adj=max(-0.15, min(0.10, return_adj)),
+        skill_adj=max(-0.12, min(0.12, skill_adj)),
+    )
+
+
+def predict_match_by_name(
+    player_a_name: str,
+    player_b_name: str,
+    config: MatchConfig,
+    n_simulations: int = DEFAULT_SIMULATIONS,
+) -> SimulationResult:
+    """
+    Predict a match outcome by player name.
+
+    Fetches each player's recent statistics and win rate from SofaScore,
+    builds :class:`PlayerStats` objects (including skill_adj from win rate),
+    and runs the Monte Carlo simulation.
+    """
+    player_a = player_stats_from_sofascore(player_a_name)
+    player_b = player_stats_from_sofascore(player_b_name)
+    return run_simulation(player_a, player_b, config, n_simulations)
+
+
+# ---------------------------------------------------------------------------
 # Demo
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # --- Live prediction using SofaScore stats (fetched at runtime) ---
+    print("Fetching SofaScore stats for Blanch vs Prizmic...")
+    live_cfg = MatchConfig(surface="hard", best_of=3)
+    live_result = predict_match_by_name("Darwin Blanch", "Dino Prizmic", live_cfg)
+    print(live_result.summary())
+
     # --- Define players with realistic ATP-tour statistics ---
     djokovic = PlayerStats(
         name="N. Djokovic",
