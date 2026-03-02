@@ -637,9 +637,55 @@ def _find_team_id(player_name: str) -> Optional[int]:
     return _scan(0, 90, 2) or _scan(90, 400, 7)
 
 
+def _tournament_tier_weight(event: dict) -> float:
+    """
+    Return a weight for how much a match's statistics should count.
+
+    ATP-level matches are played against significantly stronger opponents than
+    Challenger matches, so their serve/return stats are more predictive for
+    ATP-level predictions.  Challenger stats are weighted down to avoid
+    inflating the numbers of players who primarily compete below tour level.
+
+    Weights are based on the tournament's ATP ranking points:
+        Grand Slam / Masters 1000 (2000/1000 pts)  → 4.0
+        ATP 500                   (500 pts)         → 3.0
+        ATP 250                   (250 pts)         → 2.0
+        ATP Challenger 100/125    (100–125 pts)     → 1.0
+        ATP Challenger 50/75      (50–75 pts)       → 0.6
+        ITF / futures             (< 50 pts or ?)   → 0.3
+    """
+    ut = event.get("tournament", {}).get("uniqueTournament", {})
+    pts = ut.get("tennisPoints")
+    cat = event.get("tournament", {}).get("category", {}).get("name", "").lower()
+
+    if pts is None:
+        # Davis Cup, Next Gen Finals, etc. — treat as ATP 250 level.
+        if "atp" in cat:
+            return 2.0
+        return 1.0
+
+    if pts >= 1000:
+        return 4.0
+    if pts >= 500:
+        return 3.0
+    if pts >= 250:
+        return 2.0
+    if pts >= 100:
+        return 1.0
+    if pts >= 50:
+        return 0.6
+    return 0.3
+
+
 def _aggregate_recent_stats(team_id: int, n_matches: int = _STAT_LOOKBACK) -> dict:
     """
-    Aggregate serve/return statistics and win-rate from the player's recent matches.
+    Aggregate serve/return statistics from the player's recent matches.
+
+    Each match's contribution is weighted by tournament tier so that ATP Tour
+    statistics count more than Challenger statistics.  This prevents serve/return
+    stats from being inflated by weak Challenger-level opposition, which would
+    cause the model to over-estimate a Challenger-specialist's ability in an
+    ATP-level match.
 
     Returns a dict with keys:
         first_serve_in, first_serve_won, second_serve_won, return_won  (fractions)
@@ -649,7 +695,7 @@ def _aggregate_recent_stats(team_id: int, n_matches: int = _STAT_LOOKBACK) -> di
     events_data = _sofascore_get(f"/team/{team_id}/events/last/0")
     events = (events_data or {}).get("events", [])
 
-    acc: dict = {k: 0 for k in (
+    acc: dict = {k: 0.0 for k in (
         "fs_in", "fs_in_tot",
         "fs_won", "fs_won_tot",
         "ss_won", "ss_won_tot",
@@ -669,6 +715,8 @@ def _aggregate_recent_stats(team_id: int, n_matches: int = _STAT_LOOKBACK) -> di
         elif winner_code == 2:
             acc["losses" if is_home else "wins"] += 1
 
+        weight = _tournament_tier_weight(ev)
+
         stats_data = _sofascore_get(f"/event/{ev['id']}/statistics")
         if not stats_data:
             continue
@@ -687,13 +735,13 @@ def _aggregate_recent_stats(team_id: int, n_matches: int = _STAT_LOOKBACK) -> di
                     if not mt:
                         continue
                     if k == "firstServeAccuracy":
-                        acc["fs_in"] += mv;  acc["fs_in_tot"] += mt
+                        acc["fs_in"] += mv * weight;  acc["fs_in_tot"] += mt * weight
                     elif k == "firstServePointsAccuracy":
-                        acc["fs_won"] += mv; acc["fs_won_tot"] += mt
+                        acc["fs_won"] += mv * weight; acc["fs_won_tot"] += mt * weight
                     elif k == "secondServePointsAccuracy":
-                        acc["ss_won"] += mv; acc["ss_won_tot"] += mt
+                        acc["ss_won"] += mv * weight; acc["ss_won_tot"] += mt * weight
                     elif k in ("firstReturnPoints", "secondReturnPoints"):
-                        acc["ret_won"] += mv; acc["ret_tot"] += mt
+                        acc["ret_won"] += mv * weight; acc["ret_tot"] += mt * weight
 
     def ratio(num_key: str, den_key: str, default: float) -> float:
         d = acc[den_key]
@@ -704,8 +752,8 @@ def _aggregate_recent_stats(team_id: int, n_matches: int = _STAT_LOOKBACK) -> di
         "first_serve_won":  ratio("fs_won",  "fs_won_tot", _ATP_AVG_FIRST_SERVE_WON),
         "second_serve_won": ratio("ss_won",  "ss_won_tot", _ATP_AVG_SECOND_SERVE_WON),
         "return_won":       ratio("ret_won", "ret_tot",    _ATP_AVG_RETURN_WON),
-        "wins":  acc["wins"],
-        "losses": acc["losses"],
+        "wins":  int(acc["wins"]),
+        "losses": int(acc["losses"]),
     }
 
 
