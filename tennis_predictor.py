@@ -409,9 +409,31 @@ _SKILL_ADJ_PER_ELO = 0.000251
 _STAT_LOOKBACK = 20
 _SACKMANN_MIN_MATCHES = 10  # blend with ATP averages when sample is thinner
 
+# ---------------------------------------------------------------------------
+# Name aliases
+# Maps the normalized form of what a user types → the name to search with.
+# Add entries here whenever a player's name in the API or Sackmann CSV
+# differs from the common English spelling.
+# ---------------------------------------------------------------------------
+_NAME_ALIASES: dict[str, str] = {
+    # compound-surname players often typed with just one surname
+    "darwin blanch":    "Darwin Blanch Bernat",
+    "alejandro davidovich": "Alejandro Davidovich Fokina",
+    "pedro cachin":     "Pedro Cachin",
+    "roberto bautista": "Roberto Bautista Agut",
+    "pablo carreno":    "Pablo Carreno Busta",
+    "albert ramos":     "Albert Ramos Vinolas",
+    "feliciano lopez":  "Feliciano Lopez",
+}
+
 
 def _normalize(name: str) -> str:
     return unicodedata.normalize("NFD", name).encode("ascii", "ignore").decode().lower().strip()
+
+
+def _resolve_name(name: str) -> str:
+    """Return the canonical search name, applying any known alias."""
+    return _NAME_ALIASES.get(_normalize(name), name)
 
 
 def _ranking_to_skill_adj(ranking: int) -> float:
@@ -494,8 +516,10 @@ def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
     """
     Find a player's ranking entry by name (exact normalised match first,
     then first entry where all query words appear in the player name).
+    Applies _NAME_ALIASES before searching.
     """
-    name_norm = _normalize(name)
+    search = _resolve_name(name)
+    name_norm = _normalize(search)
     name_parts = name_norm.split()
     best: Optional[dict] = None
     for entry in rankings:
@@ -504,6 +528,9 @@ def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
             return entry
         if best is None and all(p in pname for p in name_parts):
             best = entry
+    if best is None and rankings:
+        sample = [_normalize(e.get("player", {}).get("name", "")) for e in rankings[:8]]
+        print(f"  [RapidAPI] '{name}' not matched. Sample API names: {sample}")
     return best
 
 
@@ -591,7 +618,8 @@ def _fetch_csv(filename: str) -> list[dict]:
 
 
 def _find_player_id_sackmann(name: str) -> Optional[str]:
-    name_norm = _normalize(name)
+    search = _resolve_name(name)
+    name_norm = _normalize(search)
     name_parts = name_norm.split()
     best: Optional[str] = None
     for row in _fetch_csv("atp_players.csv"):
