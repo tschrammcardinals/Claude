@@ -595,6 +595,116 @@ if __name__ == "__main__":
         fatigue_resistance=0.90,
     )
 
+    shimizu = PlayerStats(
+        name="Y. Shimizu",
+        first_serve_in=0.60,
+        first_serve_won=0.68,
+        second_serve_won=0.49,
+        return_adj=-0.02,
+        tiebreak_bonus=0.01,
+        pressure_adj=0.00,
+        fatigue_resistance=0.95,
+    )
+
+    karki = PlayerStats(
+        name="R. Karki",
+        first_serve_in=0.60,
+        first_serve_won=0.67,
+        second_serve_won=0.48,
+        return_adj=-0.01,
+        tiebreak_bonus=0.01,
+        pressure_adj=-0.01,
+        fatigue_resistance=1.00,
+    )
+
+    ostapenkov = PlayerStats(
+        name="D. Ostapenkov",
+        first_serve_in=0.61,
+        first_serve_won=0.70,
+        second_serve_won=0.50,
+        return_adj=-0.02,
+        tiebreak_bonus=0.02,
+        pressure_adj=0.00,
+        fatigue_resistance=0.95,
+    )
+
+    matsuda = PlayerStats(
+        name="R. Matsuda",
+        first_serve_in=0.62,
+        first_serve_won=0.68,
+        second_serve_won=0.49,
+        return_adj=-0.02,
+        tiebreak_bonus=0.01,
+        pressure_adj=0.00,
+        fatigue_resistance=0.95,
+    )
+
+    hewitt = PlayerStats(
+        name="C. Hewitt",
+        first_serve_in=0.62,
+        first_serve_won=0.70,
+        second_serve_won=0.50,
+        return_adj=-0.03,
+        tiebreak_bonus=0.02,
+        pressure_adj=0.01,
+        fatigue_resistance=0.90,
+    )
+
+    shin = PlayerStats(
+        name="S. Shin",
+        first_serve_in=0.61,
+        first_serve_won=0.68,
+        second_serve_won=0.49,
+        return_adj=-0.02,
+        tiebreak_bonus=0.01,
+        pressure_adj=0.00,
+        fatigue_resistance=0.95,
+    )
+
+    uchiyama = PlayerStats(
+        name="Y. Uchiyama",
+        first_serve_in=0.63,
+        first_serve_won=0.69,
+        second_serve_won=0.50,
+        return_adj=-0.03,
+        tiebreak_bonus=0.01,
+        pressure_adj=0.01,
+        fatigue_resistance=0.90,
+    )
+
+    stephens = PlayerStats(
+        name="Z. Stephens",
+        first_serve_in=0.62,
+        first_serve_won=0.70,
+        second_serve_won=0.51,
+        return_adj=-0.02,
+        tiebreak_bonus=0.02,
+        pressure_adj=0.00,
+        fatigue_resistance=1.00,
+    )
+
+    kumasaka = PlayerStats(
+        name="T. Kumasaka",
+        first_serve_in=0.61,
+        first_serve_won=0.68,
+        second_serve_won=0.49,
+        return_adj=-0.02,
+        tiebreak_bonus=0.01,
+        pressure_adj=0.00,
+        fatigue_resistance=0.95,
+    )
+
+    nakagawa = PlayerStats(
+        name="S. Nakagawa",
+        first_serve_in=0.62,
+        first_serve_won=0.68,
+        second_serve_won=0.49,
+        return_adj=-0.02,
+        tiebreak_bonus=0.01,
+        pressure_adj=0.00,
+        fatigue_resistance=0.95,
+    )
+
     # --- Full simulation: Djokovic vs Alcaraz on hard, best of 5 ---
     config = MatchConfig(surface="hard", best_of=5)
     result = run_simulation(djokovic, alcaraz, config, n_simulations=50_000)
