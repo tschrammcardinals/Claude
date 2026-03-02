@@ -25,6 +25,9 @@ if st.button("Run Simulation", type="primary", disabled=not (player_a and player
 
     st.divider()
 
+    for w in result.warnings:
+        st.warning(w)
+
     # Win probabilities
     c1, c2 = st.columns(2)
     with c1:

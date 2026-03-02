@@ -89,6 +89,7 @@ class PlayerStats:
     pressure_adj: float = 0.0
     fatigue_resistance: float = 1.0
     skill_adj: float = 0.0   # additive serve-win boost from overall Elo/win-rate signal
+    data_fetched: bool = True  # False when SofaScore lookup failed and defaults were used
 
 
 @dataclass
@@ -145,6 +146,7 @@ class SimulationResult:
     set_distribution: dict = field(default_factory=dict)
     # Average games played per match
     avg_games: float = 0.0
+    warnings: list = field(default_factory=list)
 
     @property
     def win_prob_a(self) -> float:
@@ -804,7 +806,7 @@ def player_stats_from_sofascore(name: str) -> PlayerStats:
     team_id = _find_team_id(name)
     if team_id is None:
         print(f"  [SofaScore] Could not find team ID for '{name}' — using defaults.")
-        return PlayerStats(name=name)
+        return PlayerStats(name=name, data_fetched=False)
 
     raw     = _aggregate_recent_stats(team_id)
     ranking = _fetch_atp_ranking(team_id)
@@ -847,7 +849,14 @@ def predict_match_by_name(
     """
     player_a = player_stats_from_sofascore(player_a_name)
     player_b = player_stats_from_sofascore(player_b_name)
-    return run_simulation(player_a, player_b, config, n_simulations)
+    result = run_simulation(player_a, player_b, config, n_simulations)
+    for p in (player_a, player_b):
+        if not p.data_fetched:
+            result.warnings.append(
+                f"Could not fetch SofaScore data for '{p.name}' — using ATP average defaults. "
+                f"Results will be unreliable (both players get identical stats → ~50/50)."
+            )
+    return result
 
 
 def player_stats_from_sofascore_id(team_id: int, name: str) -> PlayerStats:
@@ -889,7 +898,14 @@ def predict_match_by_id(
     """Predict a match outcome by SofaScore team IDs (bypasses name search)."""
     player_a = player_stats_from_sofascore_id(player_a_id, player_a_name)
     player_b = player_stats_from_sofascore_id(player_b_id, player_b_name)
-    return run_simulation(player_a, player_b, config, n_simulations)
+    result = run_simulation(player_a, player_b, config, n_simulations)
+    for p in (player_a, player_b):
+        if not p.data_fetched:
+            result.warnings.append(
+                f"Could not fetch SofaScore data for '{p.name}' — using ATP average defaults. "
+                f"Results will be unreliable (both players get identical stats → ~50/50)."
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
