@@ -737,10 +737,20 @@ def build_player_stats_from_matches(
     serve_samples:  list = []   # (first_in, first_won, second_won)
     return_samples: list = []   # first_return_win_rate
 
-    for event in events[:n_matches]:
+    singles_seen = 0
+    for event in events:
+        if singles_seen >= n_matches:
+            break
         event_id = event.get("id")
         if not event_id:
             continue
+
+        # Skip doubles: team names for doubles contain " / " (e.g. "Smith J / Doe A")
+        home_name = event.get("homeTeam", {}).get("name", "")
+        away_name = event.get("awayTeam", {}).get("name", "")
+        if " / " in home_name or " / " in away_name:
+            continue
+        singles_seen += 1
 
         home_id = event.get("homeTeam", {}).get("id")
         side     = "home" if home_id == player_id else "away"
@@ -762,11 +772,18 @@ def build_player_stats_from_matches(
         s_attempts = _t("secondServePointsAccuracy") # 2nd serve attempts
         s_won      = _v("secondServePointsAccuracy") # pts won on 2nd serve
 
-        if f_attempts > 0 and f_in > 0:
+        # Require at least 40 first-serve attempts to avoid incomplete/retired matches.
+        # For second-serve rate, require at least 20 attempts; otherwise fall back to
+        # tour average to avoid noise from tiny samples.
+        if f_attempts >= 40 and f_in > 0:
+            if s_attempts >= 20:
+                second_won_rate = s_won / s_attempts
+            else:
+                second_won_rate = _ATP_AVG_SECOND_SERVE_WON
             serve_samples.append((
                 f_in  / f_attempts,
                 f_won / f_in,
-                (s_won / s_attempts) if s_attempts > 0 else _ATP_AVG_SECOND_SERVE_WON,
+                second_won_rate,
             ))
 
         # --- Return stats ---
