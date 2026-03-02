@@ -3,7 +3,7 @@ from tennis_predictor import predict_match_by_name, MatchConfig
 
 st.set_page_config(page_title="Tennis Match Predictor", layout="centered")
 st.title("Tennis Match Predictor")
-st.caption("Fetches live SofaScore stats · Monte Carlo simulation · Hard court")
+st.caption("Powered by Sackmann tennis_atp data · Monte Carlo simulation · Hard court")
 
 col1, col2 = st.columns(2)
 with col1:
