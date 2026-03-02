@@ -588,9 +588,14 @@ _STAT_LOOKBACK = 20
 def _sofascore_get(path: str) -> Optional[dict]:
     """GET a SofaScore API path and return the parsed JSON, or None on failure."""
     url = _SOFASCORE_BASE + path
-    req = urllib.request.Request(
-        url, headers={"User-Agent": _SOFASCORE_UA, "Accept": "*/*"}
-    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": _SOFASCORE_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.sofascore.com/",
+        "Origin": "https://www.sofascore.com",
+        "Cache-Control": "no-cache",
+    })
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
@@ -600,29 +605,40 @@ def _sofascore_get(path: str) -> Optional[dict]:
 
 def _find_team_id(player_name: str) -> Optional[int]:
     """
-    Find a player's SofaScore team ID by scanning recent scheduled events.
+    Find a player's SofaScore team ID.
 
-    SofaScore's /search endpoint is unreliable from server environments;
-    scanning dated event lists is more robust.  Uses a tiered step size:
-    every 2 days for the first 90 days, then every 7 days up to 400 days,
-    to stay fast while still catching players who have been absent months.
+    Tries the /search endpoint first (1 request, fast).  Falls back to
+    scanning recent scheduled-event lists if search is blocked or returns
+    no tennis results.
 
     Args:
         player_name: Full or partial player name (case-insensitive).
 
     Returns:
-        The integer team ID, or None if not found within ~400 days.
+        The integer team ID, or None if not found.
     """
     import datetime
-
-    name_lower = player_name.lower()
-    today = datetime.date.today()
 
     def _ascii(s: str) -> str:
         """Strip diacritics so 'Prižmić' matches 'Prizmic'."""
         return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode().lower()
 
     name_ascii = _ascii(player_name)
+
+    # --- Strategy 1: search endpoint (fast, 1 request) ---
+    encoded = urllib.parse.quote(player_name)
+    search_data = _sofascore_get(f"/search/all?q={encoded}")
+    if search_data:
+        for result in search_data.get("results", []):
+            entity = result.get("entity", {})
+            sport = entity.get("sport", {}).get("slug", "")
+            if sport != "tennis":
+                continue
+            if name_ascii in _ascii(entity.get("name", "")):
+                return entity["id"]
+
+    # --- Strategy 2: scan scheduled events (fallback) ---
+    today = datetime.date.today()
 
     def _scan(start: int, stop: int, step: int) -> Optional[int]:
         for delta in range(start, stop, step):
