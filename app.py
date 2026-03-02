@@ -15,10 +15,12 @@ with st.sidebar:
     st.header("Data source")
 
     # Prefer key already in the environment / st.secrets.
-    env_key = os.environ.get("RAPIDAPI_KEY") or st.secrets.get("RAPIDAPI_KEY", "") if hasattr(st, "secrets") else ""
+    env_key = os.environ.get("RAPIDAPI_KEY", "")
     if not env_key:
-        # Let the user paste it in directly.
-        env_key = ""
+        try:
+            env_key = st.secrets.get("RAPIDAPI_KEY", "")
+        except Exception:
+            env_key = ""
 
     api_key_input = st.text_input(
         "RapidAPI key",
