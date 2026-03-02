@@ -50,3 +50,7 @@ if st.button("Run Simulation", type="primary", disabled=not (player_a and player
 
     st.caption(f"Average match length: {result.avg_games:.1f} games  ·  "
                f"{result.n_simulations:,} simulations")
+
+    with st.expander("Player stats used in simulation"):
+        for line in result.stats_summary:
+            st.markdown(line)

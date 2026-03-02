@@ -147,6 +147,7 @@ class SimulationResult:
     # Average games played per match
     avg_games: float = 0.0
     warnings: list = field(default_factory=list)
+    stats_summary: list = field(default_factory=list)  # human-readable per-player stat lines
 
     @property
     def win_prob_a(self) -> float:
@@ -856,6 +857,12 @@ def predict_match_by_name(
                 f"Could not fetch SofaScore data for '{p.name}' — using ATP average defaults. "
                 f"Results will be unreliable (both players get identical stats → ~50/50)."
             )
+        result.stats_summary.append(
+            f"**{p.name}** {'(live data)' if p.data_fetched else '(defaults — API failed)'}: "
+            f"1stIn={p.first_serve_in:.3f}  1stWon={p.first_serve_won:.3f}  "
+            f"2ndWon={p.second_serve_won:.3f}  retAdj={p.return_adj:+.3f}  "
+            f"skillAdj={p.skill_adj:+.4f}"
+        )
     return result
 
 
