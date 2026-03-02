@@ -550,179 +550,253 @@ def head_to_head_breakdown(
 
 
 # ---------------------------------------------------------------------------
-# Live data integration  (Sportradar Tennis API v3)
+# Live data integration  (SofaScore public API — no key required)
 # ---------------------------------------------------------------------------
 #
-# Set the SPORTRADAR_API_KEY environment variable to enable live-data fetching.
-# Each call to load_player() will attempt to pull the player's career statistics
-# from the API and derive serve/return probabilities automatically.  When the
-# key is absent, the network is unreachable, or a competitor ID is unknown, the
-# function transparently falls back to the hand-tuned static PlayerStats.
+# Serve/return statistics are derived automatically by aggregating per-match
+# data from SofaScore's public API.  No API key or account is needed.
 #
-# Obtaining competitor IDs
-# ------------------------
-# Run search_competitor_id(name, api_key) to resolve a player name against the
-# current ATP singles rankings.  Alternatively, browse:
-#   https://api.sportradar.com/tennis/trial/v3/en/rankings/atp_singles.json
-# and record the "id" field (e.g. "sr:competitor:14882") for each player, then
-# add it to PLAYER_IDS below.
+# How it works
+# ------------
+# load_player() resolves the display name (e.g. "N. Djokovic") against live
+# ATP and WTA rankings fetched from SofaScore, then downloads the player's
+# last STATS_MATCH_WINDOW completed matches and averages five per-match stats:
+#
+#   first_serve_in   = firstServeAccuracy  (serves in / total attempts)
+#   first_serve_won  = firstServePointsAccuracy (pts won / serves in)
+#   second_serve_won = secondServePointsAccuracy (pts won / 2nd-serve attempts)
+#   return_adj       = scaled from first-return-win-rate vs ATP average
+#   tiebreak_bonus   = preserved from hand-tuned fallback (per-match tiebreak
+#                      outcomes are ambiguous without extra requests)
+#
+# pressure_adj and fatigue_resistance are always preserved from the static
+# fallback because they are not observable in per-match box-score data.
+#
+# Falls back to the hand-tuned PlayerStats on any network error, if the
+# player is not found in the top-500 ATP/WTA rankings, or if too few
+# completed matches with statistics are available.
 # ---------------------------------------------------------------------------
 
-SPORTRADAR_API_BASE = "https://api.sportradar.com/tennis/trial/v3/en"
-
-# Mapping of player display name → Sportradar competitor ID.
-# Leave a value as "" if the ID is not yet known; load_player() will skip the
-# API call and use the static fallback for that player.
-PLAYER_IDS: dict = {
-    # Top-ranked players
-    "N. Djokovic":   "sr:competitor:14882",
-    "C. Alcaraz":    "sr:competitor:374211",
-    "R. Nadal":      "sr:competitor:32613",
-    "D. Medvedev":   "sr:competitor:130077",
-    # Additional players – populate IDs via search_competitor_id() or the
-    # rankings endpoint.
-    "Y. Shimizu":    "",
-    "R. Karki":      "",
-    "D. Ostapenkov": "",
-    "R. Matsuda":    "",
-    "C. Hewitt":     "",
-    "S. Shin":       "",
-    "Y. Uchiyama":   "",
-    "Z. Stephens":   "",
-    "T. Kumasaka":   "",
-    "S. Nakagawa":   "",
+SOFASCORE_API_BASE = "https://api.sofascore.com/api/v1"
+_SOFASCORE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.sofascore.com/tennis",
 }
 
-# ATP tour averages used when computing return_adj and tiebreak_bonus deltas.
-_ATP_AVG_FIRST_SERVE_IN   = 0.62
-_ATP_AVG_FIRST_SERVE_WON  = 0.72
-_ATP_AVG_SECOND_SERVE_WON = 0.52
-_ATP_AVG_BP_CONVERSION    = 0.40   # break-point conversion rate
-_ATP_AVG_TIEBREAK_WIN     = 0.50   # neutral tiebreak win rate
+# Number of recent completed matches to aggregate per player.
+STATS_MATCH_WINDOW = 20
+
+# ATP/WTA tour baselines used when computing return_adj.
+_ATP_AVG_FIRST_SERVE_IN    = 0.62
+_ATP_AVG_FIRST_SERVE_WON   = 0.72
+_ATP_AVG_SECOND_SERVE_WON  = 0.52
+_ATP_AVG_FIRST_RETURN_WIN  = 0.28   # 1 − ATP avg first-serve-points-won
+
+# Lazy ranking caches: populated on first call to _ensure_rankings_loaded().
+# Maps full player name → SofaScore team/player ID.
+_atp_id_map: dict = {}
+_wta_id_map: dict = {}
 
 
-def fetch_competitor_profile(competitor_id: str, api_key: str) -> Optional[dict]:
-    """
-    Fetch a competitor's career profile from the Sportradar Tennis API.
-
-    Returns the parsed JSON response dict, or None on any error.
-    """
-    url = f"{SPORTRADAR_API_BASE}/competitors/{competitor_id}/profile.json"
-    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+def _sofascore_get(path: str, timeout: int = 10) -> Optional[dict]:
+    """GET {SOFASCORE_API_BASE}/{path}, return parsed JSON or None on error."""
+    req = urllib.request.Request(
+        f"{SOFASCORE_API_BASE}/{path}",
+        headers=_SOFASCORE_HEADERS,
+    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
-        print(f"[sportradar] Warning: could not fetch {competitor_id}: {exc}")
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
         return None
 
 
-def search_competitor_id(name: str, api_key: str) -> Optional[str]:
-    """
-    Search ATP singles rankings for a competitor whose name contains *name*.
+def _ensure_rankings_loaded() -> None:
+    """Populate _atp_id_map and _wta_id_map if not already done."""
+    global _atp_id_map, _wta_id_map
+    # ranking_id 7 = ATP singles, 8 = WTA singles
+    for ranking_id, store_name in ((7, "_atp_id_map"), (8, "_wta_id_map")):
+        target = _atp_id_map if ranking_id == 7 else _wta_id_map
+        if target:
+            continue  # already loaded
+        data = _sofascore_get(f"rankings/{ranking_id}")
+        if not data:
+            continue
+        mapping: dict = {}
+        for row in data.get("rankingRows", []):
+            team = row.get("team", {})
+            pid  = team.get("id")
+            name = team.get("name", "").strip()
+            if pid and name:
+                mapping[name] = pid
+        if ranking_id == 7:
+            _atp_id_map = mapping
+        else:
+            _wta_id_map = mapping
 
-    Returns the Sportradar competitor ID (e.g. 'sr:competitor:14882') or None.
-    Useful for populating the PLAYER_IDS dict.
+
+def _resolve_player_id(display_name: str) -> Optional[int]:
     """
-    url = f"{SPORTRADAR_API_BASE}/rankings/atp_singles.json"
-    req = urllib.request.Request(url, headers={"x-api-key": api_key})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
-        print(f"[sportradar] Warning: could not fetch rankings: {exc}")
+    Resolve a display name like "N. Djokovic" to a SofaScore player ID.
+
+    Matches against ATP rankings first, then WTA.  The match requires the
+    first initial and last name to agree; it is case-insensitive.
+    """
+    _ensure_rankings_loaded()
+    parts = display_name.split(". ", 1)
+    if len(parts) != 2:
         return None
-
-    name_lower = name.lower()
-    for entry in data.get("rankings", []):
-        comp = entry.get("competitor", {})
-        if name_lower in comp.get("name", "").lower():
-            return comp.get("id")
+    initial, last = parts[0].upper(), parts[1].lower()
+    for store in (_atp_id_map, _wta_id_map):
+        for full_name, pid in store.items():
+            name_parts = full_name.strip().split()
+            if (len(name_parts) >= 2
+                    and name_parts[0][0].upper() == initial
+                    and name_parts[-1].lower() == last):
+                return pid
     return None
 
 
-def _best_period_stats(profile: dict, surface: str = "hard_court") -> dict:
+def _fetch_player_events(player_id: int, pages: int = 2) -> list:
     """
-    Extract the most recent period's statistics from a competitor profile.
-
-    Prefers surface-specific stats (hard_court by default), falls back to
-    overall totals, and finally to an empty dict when nothing is available.
+    Return a list of finished tennis event dicts for *player_id*.
+    Each page contains roughly 25 events; fetches up to *pages* pages.
     """
-    periods = (
-        profile
-        .get("competitor", {})
-        .get("statistics", {})
-        .get("periods", [])
-    )
-    if not periods:
-        return {}
-    latest_stats = periods[-1].get("statistics", {})
-    return latest_stats.get(surface) or latest_stats.get("overall") or {}
+    events: list = []
+    for page in range(pages):
+        data = _sofascore_get(f"team/{player_id}/events/last/{page}")
+        if not data:
+            break
+        finished = [
+            e for e in data.get("events", [])
+            if e.get("status", {}).get("type") == "finished"
+        ]
+        events.extend(finished)
+        if not data.get("hasNextPage"):
+            break
+    return events
 
 
-def build_player_stats_from_api(
+def _fetch_event_stats_flat(event_id: int) -> Optional[dict]:
+    """
+    Fetch match statistics and return a flat dict keyed by statisticsItem key.
+
+    Each value is a dict with homeValue, homeTotal, awayValue, awayTotal.
+    Only the "ALL" period (whole-match totals) is used.
+    Returns None when the endpoint is unavailable.
+    """
+    data = _sofascore_get(f"event/{event_id}/statistics")
+    if not data:
+        return None
+    flat: dict = {}
+    for period in data.get("statistics", []):
+        if period.get("period") != "ALL":
+            continue
+        for group in period.get("groups", []):
+            for item in group.get("statisticsItems", []):
+                key = item.get("key")
+                if key:
+                    flat[key] = {
+                        "homeValue": item.get("homeValue", 0),
+                        "homeTotal": item.get("homeTotal"),
+                        "awayValue": item.get("awayValue", 0),
+                        "awayTotal": item.get("awayTotal"),
+                    }
+        break  # stop after ALL period
+    return flat or None
+
+
+def build_player_stats_from_matches(
     name: str,
-    profile: dict,
-    surface: str = "hard_court",
+    player_id: int,
+    n_matches: int = STATS_MATCH_WINDOW,
     fallback: Optional["PlayerStats"] = None,
 ) -> "PlayerStats":
     """
-    Convert a Sportradar competitor profile into a PlayerStats instance.
+    Fetch recent matches for *player_id* and derive PlayerStats by averaging
+    per-match serve and return statistics from SofaScore.
 
-    Stat derivations
-    ----------------
-    first_serve_in   = first_serve_successful / total_service_points
-    first_serve_won  = first_serve_points_won  / first_serve_successful
-    second_serve_won = second_serve_points_won / second_serve_successful
-    return_adj       = scaled from break-point conversion vs ATP average
-    tiebreak_bonus   = scaled from tiebreak win-rate vs 0.50
-    pressure_adj     = preserved from *fallback* (not directly in API)
-    fatigue_resistance = preserved from *fallback* (not directly in API)
+    Stat derivations (per match, then averaged)
+    -------------------------------------------
+    first_serve_in   = firstServeAccuracy.value  / firstServeAccuracy.total
+    first_serve_won  = firstServePointsAccuracy.value  / .total
+    second_serve_won = secondServePointsAccuracy.value / .total
+    return_adj       = −(avg_first_return_win_rate − ATP_avg) × 0.60
+                       clamped to [−0.10, +0.05]
+
+    tiebreak_bonus, pressure_adj, fatigue_resistance are preserved from
+    *fallback* because they cannot be reliably computed from box-score data.
     """
-    s = _best_period_stats(profile, surface)
-    if not s:
+    pages_needed = max(1, math.ceil(n_matches / 20))
+    events = _fetch_player_events(player_id, pages=pages_needed)
+
+    serve_samples:  list = []   # (first_in, first_won, second_won)
+    return_samples: list = []   # first_return_win_rate
+
+    for event in events[:n_matches]:
+        event_id = event.get("id")
+        if not event_id:
+            continue
+
+        home_id = event.get("homeTeam", {}).get("id")
+        side     = "home" if home_id == player_id else "away"
+
+        stats = _fetch_event_stats_flat(event_id)
+        if not stats:
+            continue
+
+        def _v(key: str) -> float:
+            return stats.get(key, {}).get(f"{side}Value", 0) or 0
+
+        def _t(key: str) -> float:
+            return stats.get(key, {}).get(f"{side}Total") or 0
+
+        # --- Serve stats ---
+        f_attempts = _t("firstServeAccuracy")    # total 1st serve attempts
+        f_in       = _v("firstServeAccuracy")    # 1st serves that landed in
+        f_won      = _v("firstServePointsAccuracy")  # pts won on 1st serve
+        s_attempts = _t("secondServePointsAccuracy") # 2nd serve attempts
+        s_won      = _v("secondServePointsAccuracy") # pts won on 2nd serve
+
+        if f_attempts > 0 and f_in > 0:
+            serve_samples.append((
+                f_in  / f_attempts,
+                f_won / f_in,
+                (s_won / s_attempts) if s_attempts > 0 else _ATP_AVG_SECOND_SERVE_WON,
+            ))
+
+        # --- Return stats ---
+        # firstReturnPoints: value = player's return wins, total = opponent's
+        # 1st serves in.  win_rate tells us how good this player is at returning.
+        ret_won   = _v("firstReturnPoints")
+        ret_total = _t("firstReturnPoints")
+        if ret_total > 0:
+            return_samples.append(ret_won / ret_total)
+
+    if not serve_samples:
         return fallback if fallback is not None else PlayerStats(name=name)
 
-    total_svc   = s.get("service_points_won", 0) + s.get("service_points_lost", 0)
-    first_in    = s.get("first_serve_successful", 0)
-    first_won   = s.get("first_serve_points_won", 0)
-    second_succ = s.get("second_serve_successful", 0)
-    second_won  = s.get("second_serve_points_won", 0)
-    bp_won      = s.get("breakpoints_won", 0)
-    bp_total    = s.get("total_breakpoints", 0)
-    tb_won      = s.get("tiebreaks_won", 0)
-    matches     = s.get("matches_played", 1) or 1
+    p_first_in   = max(0.40, min(0.80,
+        sum(s[0] for s in serve_samples) / len(serve_samples)))
+    p_first_won  = max(0.50, min(0.90,
+        sum(s[1] for s in serve_samples) / len(serve_samples)))
+    p_second_won = max(0.30, min(0.70,
+        sum(s[2] for s in serve_samples) / len(serve_samples)))
 
-    # Serve probabilities
-    if total_svc > 0 and first_in > 0:
-        p_first_in  = max(0.40, min(0.80, first_in / total_svc))
-        p_first_won = max(0.50, min(0.90, first_won / first_in))
-    else:
-        p_first_in  = _ATP_AVG_FIRST_SERVE_IN
-        p_first_won = _ATP_AVG_FIRST_SERVE_WON
-
-    p_second_won = (
-        max(0.30, min(0.70, second_won / second_succ))
-        if second_succ > 0
-        else _ATP_AVG_SECOND_SERVE_WON
-    )
-
-    # Return adjustment: each 10 pp above ATP average → -0.03 return_adj
-    if bp_total > 0:
+    if return_samples:
+        avg_ret = sum(return_samples) / len(return_samples)
         return_adj = max(-0.10, min(0.05,
-            -round((bp_won / bp_total - _ATP_AVG_BP_CONVERSION) * 0.30, 3)
+            round(-(avg_ret - _ATP_AVG_FIRST_RETURN_WIN) * 0.60, 3)
         ))
     else:
         return_adj = fallback.return_adj if fallback is not None else 0.0
 
-    # Tiebreak bonus: rough proxy using ~0.5 tiebreaks per match
-    estimated_tb = max(1, int(matches * 0.5))
-    tb_rate = min(tb_won / estimated_tb, 1.0)
-    tiebreak_bonus = max(-0.02, min(0.06,
-        round((tb_rate - _ATP_AVG_TIEBREAK_WIN) * 0.10, 3)
-    ))
-
-    # Preserve hand-tuned values not derivable from the API
+    # Preserve hand-tuned values not observable from per-match box scores.
+    tiebreak_bonus     = fallback.tiebreak_bonus     if fallback is not None else 0.02
     pressure_adj       = fallback.pressure_adj       if fallback is not None else 0.0
     fatigue_resistance = fallback.fatigue_resistance if fallback is not None else 1.0
 
@@ -740,42 +814,31 @@ def build_player_stats_from_api(
 
 def load_player(
     fallback: "PlayerStats",
-    api_key: Optional[str] = None,
-    competitor_id: Optional[str] = None,
-    surface: str = "hard_court",
+    n_matches: int = STATS_MATCH_WINDOW,
 ) -> "PlayerStats":
     """
-    Return a PlayerStats object, fetching live Sportradar data when possible.
+    Return a PlayerStats object backed by live SofaScore data when available.
 
-    Priority
-    --------
-    1. Live stats from Sportradar API (if api_key and competitor_id are set).
-    2. *fallback* PlayerStats (static hand-tuned values).
+    Resolution order
+    ----------------
+    1. Resolve the display name (e.g. "N. Djokovic") against live ATP/WTA
+       rankings fetched from SofaScore (no API key needed).
+    2. Download the player's last *n_matches* completed events and aggregate
+       per-match serve/return statistics.
+    3. Fall back to *fallback* on network errors, unranked players, or
+       insufficient match history.
 
-    The API-derived object always inherits pressure_adj and fatigue_resistance
-    from *fallback*, since those attributes are not available via the API.
-
-    Args:
-        fallback:      Static PlayerStats used when the API is unavailable.
-        api_key:       Sportradar API key.  Defaults to the SPORTRADAR_API_KEY
-                       environment variable.
-        competitor_id: Sportradar competitor ID.  Defaults to the entry in
-                       PLAYER_IDS for fallback.name.
-        surface:       Surface for which to pull surface-specific stats
-                       (Sportradar field names: 'hard_court', 'clay', 'grass').
+    pressure_adj and fatigue_resistance are always preserved from *fallback*
+    because they are not observable from per-match box-score data.
     """
-    key = api_key or os.environ.get("SPORTRADAR_API_KEY", "")
-    cid = competitor_id or PLAYER_IDS.get(fallback.name, "")
-
-    if not key or not cid:
+    player_id = _resolve_player_id(fallback.name)
+    if player_id is None:
         return fallback
 
-    profile = fetch_competitor_profile(cid, key)
-    if profile is None:
-        return fallback
-
-    live = build_player_stats_from_api(fallback.name, profile, surface, fallback)
-    print(f"[sportradar] Loaded live stats for {fallback.name}")
+    live = build_player_stats_from_matches(
+        fallback.name, player_id, n_matches=n_matches, fallback=fallback,
+    )
+    print(f"[sofascore] Loaded live stats for {fallback.name} (id={player_id})")
     return live
 
 
