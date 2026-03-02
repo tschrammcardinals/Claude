@@ -2,7 +2,7 @@ import os
 
 import streamlit as st
 
-from tennis_predictor import predict_match_by_name, MatchConfig
+from tennis_predictor import predict_match_by_name, MatchConfig, get_player_names
 
 st.set_page_config(page_title="Tennis Match Predictor", layout="centered")
 st.title("Tennis Match Predictor")
@@ -47,6 +47,16 @@ with st.sidebar:
     )
 
 # ---------------------------------------------------------------------------
+# Player list (cached per API key so it only fetches once per session)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner="Loading player list...")
+def _load_players(api_key: str) -> list[str]:
+    return get_player_names(api_key or None, top_n=500)
+
+players = _load_players(resolved_key or "")
+
+# ---------------------------------------------------------------------------
 # Main form
 # ---------------------------------------------------------------------------
 
@@ -54,9 +64,11 @@ st.caption("Monte Carlo point-by-point simulation")
 
 col1, col2 = st.columns(2)
 with col1:
-    player_a = st.text_input("Player A", placeholder="e.g. Darwin Blanch")
+    player_a = st.selectbox("Player A", options=players, index=None,
+                            placeholder="Search player…")
 with col2:
-    player_b = st.text_input("Player B", placeholder="e.g. Dino Prizmic")
+    player_b = st.selectbox("Player B", options=players, index=None,
+                            placeholder="Search player…")
 
 surface = st.selectbox("Surface", ["hard", "clay", "grass"], index=0)
 best_of = st.radio("Format", [3, 5], horizontal=True)

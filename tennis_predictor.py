@@ -859,6 +859,44 @@ def predict_match_by_name(
 
 
 # ---------------------------------------------------------------------------
+# Player list (used to populate UI dropdowns)
+# ---------------------------------------------------------------------------
+
+def get_player_names(api_key: Optional[str] = None, top_n: int = 500) -> list[str]:
+    """
+    Return up to top_n ATP player names in rank order.
+    Uses live rankings if api_key is provided, else Sackmann fallback.
+    """
+    resolved_key = api_key or _get_api_key()
+    if resolved_key:
+        rankings = _get_rankings(resolved_key)
+        return [
+            entry["player"]["name"]
+            for entry in rankings[:top_n]
+            if entry.get("player", {}).get("name")
+        ]
+    # Sackmann fallback: join atp_rankings_current with atp_players
+    id_to_name: dict[str, str] = {}
+    for row in _fetch_csv("atp_players.csv"):
+        pid = row.get("player_id", "")
+        if pid:
+            first = row.get("name_first", "")
+            last = row.get("name_last", "")
+            id_to_name[pid] = f"{first} {last}".strip()
+    ranked: list[tuple[int, str]] = []
+    for row in _fetch_csv("atp_rankings_current.csv"):
+        pid = row.get("player", "")
+        try:
+            rank = int(row["rank"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if pid in id_to_name:
+            ranked.append((rank, id_to_name[pid]))
+    ranked.sort()
+    return [name for _, name in ranked[:top_n]]
+
+
+# ---------------------------------------------------------------------------
 # Demo
 # ---------------------------------------------------------------------------
 
