@@ -15,9 +15,13 @@ Player statistics drive point-win probabilities, adjusted for:
 Run `python tennis_predictor.py` to see a demo.
 """
 
+import json
 import math
+import os
 import random
 import statistics
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -546,23 +550,263 @@ def head_to_head_breakdown(
 
 
 # ---------------------------------------------------------------------------
+# Live data integration  (Sportradar Tennis API v3)
+# ---------------------------------------------------------------------------
+#
+# Set the SPORTRADAR_API_KEY environment variable to enable live-data fetching.
+# Each call to load_player() will attempt to pull the player's career statistics
+# from the API and derive serve/return probabilities automatically.  When the
+# key is absent, the network is unreachable, or a competitor ID is unknown, the
+# function transparently falls back to the hand-tuned static PlayerStats.
+#
+# Obtaining competitor IDs
+# ------------------------
+# Run search_competitor_id(name, api_key) to resolve a player name against the
+# current ATP singles rankings.  Alternatively, browse:
+#   https://api.sportradar.com/tennis/trial/v3/en/rankings/atp_singles.json
+# and record the "id" field (e.g. "sr:competitor:14882") for each player, then
+# add it to PLAYER_IDS below.
+# ---------------------------------------------------------------------------
+
+SPORTRADAR_API_BASE = "https://api.sportradar.com/tennis/trial/v3/en"
+
+# Mapping of player display name → Sportradar competitor ID.
+# Leave a value as "" if the ID is not yet known; load_player() will skip the
+# API call and use the static fallback for that player.
+PLAYER_IDS: dict = {
+    # Top-ranked players
+    "N. Djokovic":   "sr:competitor:14882",
+    "C. Alcaraz":    "sr:competitor:374211",
+    "R. Nadal":      "sr:competitor:32613",
+    "D. Medvedev":   "sr:competitor:130077",
+    # Additional players – populate IDs via search_competitor_id() or the
+    # rankings endpoint.
+    "Y. Shimizu":    "",
+    "R. Karki":      "",
+    "D. Ostapenkov": "",
+    "R. Matsuda":    "",
+    "C. Hewitt":     "",
+    "S. Shin":       "",
+    "Y. Uchiyama":   "",
+    "Z. Stephens":   "",
+    "T. Kumasaka":   "",
+    "S. Nakagawa":   "",
+}
+
+# ATP tour averages used when computing return_adj and tiebreak_bonus deltas.
+_ATP_AVG_FIRST_SERVE_IN   = 0.62
+_ATP_AVG_FIRST_SERVE_WON  = 0.72
+_ATP_AVG_SECOND_SERVE_WON = 0.52
+_ATP_AVG_BP_CONVERSION    = 0.40   # break-point conversion rate
+_ATP_AVG_TIEBREAK_WIN     = 0.50   # neutral tiebreak win rate
+
+
+def fetch_competitor_profile(competitor_id: str, api_key: str) -> Optional[dict]:
+    """
+    Fetch a competitor's career profile from the Sportradar Tennis API.
+
+    Returns the parsed JSON response dict, or None on any error.
+    """
+    url = f"{SPORTRADAR_API_BASE}/competitors/{competitor_id}/profile.json"
+    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        print(f"[sportradar] Warning: could not fetch {competitor_id}: {exc}")
+        return None
+
+
+def search_competitor_id(name: str, api_key: str) -> Optional[str]:
+    """
+    Search ATP singles rankings for a competitor whose name contains *name*.
+
+    Returns the Sportradar competitor ID (e.g. 'sr:competitor:14882') or None.
+    Useful for populating the PLAYER_IDS dict.
+    """
+    url = f"{SPORTRADAR_API_BASE}/rankings/atp_singles.json"
+    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        print(f"[sportradar] Warning: could not fetch rankings: {exc}")
+        return None
+
+    name_lower = name.lower()
+    for entry in data.get("rankings", []):
+        comp = entry.get("competitor", {})
+        if name_lower in comp.get("name", "").lower():
+            return comp.get("id")
+    return None
+
+
+def _best_period_stats(profile: dict, surface: str = "hard_court") -> dict:
+    """
+    Extract the most recent period's statistics from a competitor profile.
+
+    Prefers surface-specific stats (hard_court by default), falls back to
+    overall totals, and finally to an empty dict when nothing is available.
+    """
+    periods = (
+        profile
+        .get("competitor", {})
+        .get("statistics", {})
+        .get("periods", [])
+    )
+    if not periods:
+        return {}
+    latest_stats = periods[-1].get("statistics", {})
+    return latest_stats.get(surface) or latest_stats.get("overall") or {}
+
+
+def build_player_stats_from_api(
+    name: str,
+    profile: dict,
+    surface: str = "hard_court",
+    fallback: Optional["PlayerStats"] = None,
+) -> "PlayerStats":
+    """
+    Convert a Sportradar competitor profile into a PlayerStats instance.
+
+    Stat derivations
+    ----------------
+    first_serve_in   = first_serve_successful / total_service_points
+    first_serve_won  = first_serve_points_won  / first_serve_successful
+    second_serve_won = second_serve_points_won / second_serve_successful
+    return_adj       = scaled from break-point conversion vs ATP average
+    tiebreak_bonus   = scaled from tiebreak win-rate vs 0.50
+    pressure_adj     = preserved from *fallback* (not directly in API)
+    fatigue_resistance = preserved from *fallback* (not directly in API)
+    """
+    s = _best_period_stats(profile, surface)
+    if not s:
+        return fallback if fallback is not None else PlayerStats(name=name)
+
+    total_svc   = s.get("service_points_won", 0) + s.get("service_points_lost", 0)
+    first_in    = s.get("first_serve_successful", 0)
+    first_won   = s.get("first_serve_points_won", 0)
+    second_succ = s.get("second_serve_successful", 0)
+    second_won  = s.get("second_serve_points_won", 0)
+    bp_won      = s.get("breakpoints_won", 0)
+    bp_total    = s.get("total_breakpoints", 0)
+    tb_won      = s.get("tiebreaks_won", 0)
+    matches     = s.get("matches_played", 1) or 1
+
+    # Serve probabilities
+    if total_svc > 0 and first_in > 0:
+        p_first_in  = max(0.40, min(0.80, first_in / total_svc))
+        p_first_won = max(0.50, min(0.90, first_won / first_in))
+    else:
+        p_first_in  = _ATP_AVG_FIRST_SERVE_IN
+        p_first_won = _ATP_AVG_FIRST_SERVE_WON
+
+    p_second_won = (
+        max(0.30, min(0.70, second_won / second_succ))
+        if second_succ > 0
+        else _ATP_AVG_SECOND_SERVE_WON
+    )
+
+    # Return adjustment: each 10 pp above ATP average → -0.03 return_adj
+    if bp_total > 0:
+        return_adj = max(-0.10, min(0.05,
+            -round((bp_won / bp_total - _ATP_AVG_BP_CONVERSION) * 0.30, 3)
+        ))
+    else:
+        return_adj = fallback.return_adj if fallback is not None else 0.0
+
+    # Tiebreak bonus: rough proxy using ~0.5 tiebreaks per match
+    estimated_tb = max(1, int(matches * 0.5))
+    tb_rate = min(tb_won / estimated_tb, 1.0)
+    tiebreak_bonus = max(-0.02, min(0.06,
+        round((tb_rate - _ATP_AVG_TIEBREAK_WIN) * 0.10, 3)
+    ))
+
+    # Preserve hand-tuned values not derivable from the API
+    pressure_adj       = fallback.pressure_adj       if fallback is not None else 0.0
+    fatigue_resistance = fallback.fatigue_resistance if fallback is not None else 1.0
+
+    return PlayerStats(
+        name=name,
+        first_serve_in=round(p_first_in, 3),
+        first_serve_won=round(p_first_won, 3),
+        second_serve_won=round(p_second_won, 3),
+        return_adj=return_adj,
+        tiebreak_bonus=tiebreak_bonus,
+        pressure_adj=pressure_adj,
+        fatigue_resistance=fatigue_resistance,
+    )
+
+
+def load_player(
+    fallback: "PlayerStats",
+    api_key: Optional[str] = None,
+    competitor_id: Optional[str] = None,
+    surface: str = "hard_court",
+) -> "PlayerStats":
+    """
+    Return a PlayerStats object, fetching live Sportradar data when possible.
+
+    Priority
+    --------
+    1. Live stats from Sportradar API (if api_key and competitor_id are set).
+    2. *fallback* PlayerStats (static hand-tuned values).
+
+    The API-derived object always inherits pressure_adj and fatigue_resistance
+    from *fallback*, since those attributes are not available via the API.
+
+    Args:
+        fallback:      Static PlayerStats used when the API is unavailable.
+        api_key:       Sportradar API key.  Defaults to the SPORTRADAR_API_KEY
+                       environment variable.
+        competitor_id: Sportradar competitor ID.  Defaults to the entry in
+                       PLAYER_IDS for fallback.name.
+        surface:       Surface for which to pull surface-specific stats
+                       (Sportradar field names: 'hard_court', 'clay', 'grass').
+    """
+    key = api_key or os.environ.get("SPORTRADAR_API_KEY", "")
+    cid = competitor_id or PLAYER_IDS.get(fallback.name, "")
+
+    if not key or not cid:
+        return fallback
+
+    profile = fetch_competitor_profile(cid, key)
+    if profile is None:
+        return fallback
+
+    live = build_player_stats_from_api(fallback.name, profile, surface, fallback)
+    print(f"[sportradar] Loaded live stats for {fallback.name}")
+    return live
+
+
+# ---------------------------------------------------------------------------
 # Demo
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # --- Define players with realistic ATP-tour statistics ---
-    djokovic = PlayerStats(
+    # -----------------------------------------------------------------------
+    # Player definitions
+    # -----------------------------------------------------------------------
+    # Each player is defined with hand-tuned ATP-tour statistics as a fallback.
+    # load_player() will automatically replace serve/return stats with live
+    # figures from the Sportradar API when SPORTRADAR_API_KEY is set and a
+    # competitor ID is available in PLAYER_IDS.  pressure_adj and
+    # fatigue_resistance are always preserved from the fallback because they
+    # are not exposed by the API.
+    # -----------------------------------------------------------------------
+
+    djokovic = load_player(PlayerStats(
         name="N. Djokovic",
         first_serve_in=0.62,
         first_serve_won=0.74,
         second_serve_won=0.55,
-        return_adj=-0.06,      # elite returner (lowers opponent's serve-win prob)
+        return_adj=-0.06,       # elite returner (lowers opponent's serve-win prob)
         tiebreak_bonus=0.04,
-        pressure_adj=0.03,     # mentally very strong
-        fatigue_resistance=0.7,  # very fit; fatigue hits him less
-    )
+        pressure_adj=0.03,      # mentally very strong
+        fatigue_resistance=0.7, # very fit; fatigue hits him less
+    ))
 
-    alcaraz = PlayerStats(
+    alcaraz = load_player(PlayerStats(
         name="C. Alcaraz",
         first_serve_in=0.63,
         first_serve_won=0.73,
@@ -571,20 +815,20 @@ if __name__ == "__main__":
         tiebreak_bonus=0.02,
         pressure_adj=0.01,
         fatigue_resistance=0.85,
-    )
+    ))
 
-    nadal = PlayerStats(
+    nadal = load_player(PlayerStats(
         name="R. Nadal",
         first_serve_in=0.70,
         first_serve_won=0.68,
         second_serve_won=0.50,
-        return_adj=-0.07,      # best clay returner of all time
+        return_adj=-0.07,        # best clay returner of all time
         tiebreak_bonus=0.00,
         pressure_adj=0.04,
-        fatigue_resistance=0.60,  # extreme fitness / clay sliding
-    )
+        fatigue_resistance=0.60, # extreme fitness / clay sliding
+    ))
 
-    medvedev = PlayerStats(
+    medvedev = load_player(PlayerStats(
         name="D. Medvedev",
         first_serve_in=0.64,
         first_serve_won=0.75,
@@ -593,9 +837,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.03,
         pressure_adj=0.00,
         fatigue_resistance=0.90,
-    )
+    ))
 
-    shimizu = PlayerStats(
+    shimizu = load_player(PlayerStats(
         name="Y. Shimizu",
         first_serve_in=0.60,
         first_serve_won=0.68,
@@ -604,9 +848,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=0.00,
         fatigue_resistance=0.95,
-    )
+    ))
 
-    karki = PlayerStats(
+    karki = load_player(PlayerStats(
         name="R. Karki",
         first_serve_in=0.60,
         first_serve_won=0.67,
@@ -615,9 +859,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=-0.01,
         fatigue_resistance=1.00,
-    )
+    ))
 
-    ostapenkov = PlayerStats(
+    ostapenkov = load_player(PlayerStats(
         name="D. Ostapenkov",
         first_serve_in=0.61,
         first_serve_won=0.70,
@@ -626,9 +870,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.02,
         pressure_adj=0.00,
         fatigue_resistance=0.95,
-    )
+    ))
 
-    matsuda = PlayerStats(
+    matsuda = load_player(PlayerStats(
         name="R. Matsuda",
         first_serve_in=0.62,
         first_serve_won=0.68,
@@ -637,9 +881,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=0.00,
         fatigue_resistance=0.95,
-    )
+    ))
 
-    hewitt = PlayerStats(
+    hewitt = load_player(PlayerStats(
         name="C. Hewitt",
         first_serve_in=0.62,
         first_serve_won=0.70,
@@ -648,9 +892,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.02,
         pressure_adj=0.01,
         fatigue_resistance=0.90,
-    )
+    ))
 
-    shin = PlayerStats(
+    shin = load_player(PlayerStats(
         name="S. Shin",
         first_serve_in=0.61,
         first_serve_won=0.68,
@@ -659,9 +903,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=0.00,
         fatigue_resistance=0.95,
-    )
+    ))
 
-    uchiyama = PlayerStats(
+    uchiyama = load_player(PlayerStats(
         name="Y. Uchiyama",
         first_serve_in=0.63,
         first_serve_won=0.69,
@@ -670,9 +914,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=0.01,
         fatigue_resistance=0.90,
-    )
+    ))
 
-    stephens = PlayerStats(
+    stephens = load_player(PlayerStats(
         name="Z. Stephens",
         first_serve_in=0.62,
         first_serve_won=0.70,
@@ -681,9 +925,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.02,
         pressure_adj=0.00,
         fatigue_resistance=1.00,
-    )
+    ))
 
-    kumasaka = PlayerStats(
+    kumasaka = load_player(PlayerStats(
         name="T. Kumasaka",
         first_serve_in=0.61,
         first_serve_won=0.68,
@@ -692,9 +936,9 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=0.00,
         fatigue_resistance=0.95,
-    )
+    ))
 
-    nakagawa = PlayerStats(
+    nakagawa = load_player(PlayerStats(
         name="S. Nakagawa",
         first_serve_in=0.62,
         first_serve_won=0.68,
@@ -703,7 +947,7 @@ if __name__ == "__main__":
         tiebreak_bonus=0.01,
         pressure_adj=0.00,
         fatigue_resistance=0.95,
-    )
+    ))
 
     # --- Full simulation: Djokovic vs Alcaraz on hard, best of 5 ---
     config = MatchConfig(surface="hard", best_of=5)
