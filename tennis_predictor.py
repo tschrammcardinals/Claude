@@ -1034,8 +1034,7 @@ def predict_match_by_name(
 
     if not resolved_key:
         result.warnings.append(
-            "No RAPIDAPI_KEY set — using Sackmann 2024 data (last updated Dec 2024). "
-            "Add your key in the sidebar to get live 2025/2026 stats."
+            "No RAPIDAPI_KEY set — using Sackmann 2024 data (last updated Dec 2024)."
         )
 
     for p, src in ((player_a, serve_source_a), (player_b, serve_source_b)):
