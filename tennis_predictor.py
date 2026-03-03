@@ -503,65 +503,66 @@ def _api_get(path: str, api_key: str) -> Optional[dict]:
         return None
 
 
+_RANKINGS_CANDIDATE_PATHS = [
+    "/tennis/v2/atp/ranking/singles/",
+    "/atp/ranking/singles/",
+    "/v2/atp/ranking/singles/",
+    "/tennis/atp/ranking/singles/",
+    "/atp/ranking/singles",
+]
+
+
 def _get_rankings(api_key: str) -> list[dict]:
     """
     Fetch (and cache) the current ATP singles rankings.
-
-    Each entry: {position, point, player: {id, name, countryAcr}}
+    Tries multiple endpoint path variants until one succeeds.
     """
     global _rankings_cache
     if _rankings_cache is not None:
         return _rankings_cache
-    data = _api_get("/tennis/v2/atp/ranking/singles/", api_key)
-    result = (data or {}).get("data", [])
-    if result:
-        _rankings_cache = result
-        print(f"  [RapidAPI] Rankings loaded: {len(_rankings_cache)} players (live {datetime.date.today()})")
-    else:
-        print(f"  [RapidAPI] Rankings returned empty — response keys: {list((data or {}).keys())}")
-    return result
+    for path in _RANKINGS_CANDIDATE_PATHS:
+        data = _api_get(path, api_key)
+        if data is None:
+            continue
+        result = data.get("data", [])
+        if result:
+            _rankings_cache = result
+            print(f"  [RapidAPI] Rankings loaded via {path}: {len(_rankings_cache)} players")
+            return _rankings_cache
+        print(f"  [RapidAPI] {path} responded but 'data' was empty — keys: {list(data.keys())}")
+    print("  [RapidAPI] All ranking endpoint variants failed.")
+    return []
 
 
 def debug_raw_rankings(api_key: str) -> dict:
-    """Return diagnostic info about the raw API rankings response."""
+    """Test all ranking endpoint variants and return what each one returns."""
     key_preview = f"{api_key[:6]}…{api_key[-4:]}" if api_key else "None"
-    url = _RAPIDAPI_BASE + "/tennis/v2/atp/ranking/singles/"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "X-RapidAPI-Key": api_key,
-            "X-RapidAPI-Host": _RAPIDAPI_HOST,
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw_bytes = resp.read()
-            data = json.loads(raw_bytes.decode())
-    except Exception as e:
-        return {
-            "api_key_preview": key_preview,
-            "url": url,
-            "error": str(e),
-            "error_type": type(e).__name__,
-        }
-
-    top_level_keys = list(data.keys())
-    raw_list = data.get("data", [])
-    first_entry = raw_list[0] if raw_list else None
-    names_found = [
-        e.get("player", {}).get("name", "") if isinstance(e.get("player"), dict)
-        else str(e.get("player", ""))
-        for e in raw_list[:5]
-    ]
-    return {
-        "api_key_preview": key_preview,
-        "url": url,
-        "top_level_keys": top_level_keys,
-        "data_list_length": len(raw_list),
-        "first_entry_raw": first_entry,
-        "first_5_names_parsed": names_found,
-    }
+    results = {"api_key_preview": key_preview, "endpoints": {}}
+    for path in _RANKINGS_CANDIDATE_PATHS:
+        url = _RAPIDAPI_BASE + path
+        req = urllib.request.Request(
+            url,
+            headers={
+                "X-RapidAPI-Key": api_key,
+                "X-RapidAPI-Host": _RAPIDAPI_HOST,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            raw_list = data.get("data", [])
+            results["endpoints"][path] = {
+                "status": "OK",
+                "top_level_keys": list(data.keys()),
+                "data_length": len(raw_list),
+                "first_entry": raw_list[0] if raw_list else None,
+            }
+        except Exception as e:
+            results["endpoints"][path] = {
+                "status": f"ERROR: {type(e).__name__}: {e}",
+            }
+    return results
 
 
 def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
