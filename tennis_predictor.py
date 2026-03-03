@@ -1049,15 +1049,27 @@ def get_player_names(api_key: Optional[str] = None, top_n: int = 500) -> list[st
             first = row.get("name_first", "")
             last = row.get("name_last", "")
             id_to_name[pid] = f"{first} {last}".strip()
+    # atp_rankings_current.csv has one row per player per week — use only
+    # the latest ranking date to avoid filling the dropdown with duplicates.
+    all_rows = _fetch_csv("atp_rankings_current.csv")
+    latest_date = max(
+        (r.get("ranking_date", "") for r in all_rows if r.get("ranking_date")),
+        default="",
+    )
     ranked: list[tuple[int, str]] = []
-    for row in _fetch_csv("atp_rankings_current.csv"):
+    seen: set[str] = set()
+    for row in all_rows:
+        if row.get("ranking_date") != latest_date:
+            continue
         pid = row.get("player", "")
+        if pid in seen or pid not in id_to_name:
+            continue
         try:
             rank = int(row["rank"])
         except (KeyError, ValueError, TypeError):
             continue
-        if pid in id_to_name:
-            ranked.append((rank, id_to_name[pid]))
+        seen.add(pid)
+        ranked.append((rank, id_to_name[pid]))
     ranked.sort()
     return [name for _, name in ranked[:top_n]]
 
