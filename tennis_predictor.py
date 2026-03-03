@@ -524,9 +524,28 @@ def _get_rankings(api_key: str) -> list[dict]:
 
 def debug_raw_rankings(api_key: str) -> dict:
     """Return diagnostic info about the raw API rankings response."""
-    data = _api_get("/tennis/v2/atp/ranking/singles/", api_key)
-    if data is None:
-        return {"error": "API call failed (check terminal for details)"}
+    key_preview = f"{api_key[:6]}…{api_key[-4:]}" if api_key else "None"
+    url = _RAPIDAPI_BASE + "/tennis/v2/atp/ranking/singles/"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "X-RapidAPI-Key": api_key,
+            "X-RapidAPI-Host": _RAPIDAPI_HOST,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw_bytes = resp.read()
+            data = json.loads(raw_bytes.decode())
+    except Exception as e:
+        return {
+            "api_key_preview": key_preview,
+            "url": url,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
     top_level_keys = list(data.keys())
     raw_list = data.get("data", [])
     first_entry = raw_list[0] if raw_list else None
@@ -536,6 +555,8 @@ def debug_raw_rankings(api_key: str) -> dict:
         for e in raw_list[:5]
     ]
     return {
+        "api_key_preview": key_preview,
+        "url": url,
         "top_level_keys": top_level_keys,
         "data_list_length": len(raw_list),
         "first_entry_raw": first_entry,
