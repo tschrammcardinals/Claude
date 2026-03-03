@@ -2,61 +2,40 @@ import os
 
 import streamlit as st
 
-from tennis_predictor import predict_match_by_name, MatchConfig, get_player_names
+from tennis_predictor import (
+    MatchConfig,
+    get_player_names,
+    predict_match_by_name,
+    _find_in_rankings,
+    _get_rankings,
+)
 
 st.set_page_config(page_title="Tennis Match Predictor", layout="centered")
 st.title("Tennis Match Predictor")
 
 # ---------------------------------------------------------------------------
-# Sidebar — API key
+# API key — from secrets.toml or environment, no user input required
 # ---------------------------------------------------------------------------
 
-with st.sidebar:
-    st.header("Data source")
-
-    # Prefer key already in the environment / st.secrets.
-    env_key = os.environ.get("RAPIDAPI_KEY", "")
-    if not env_key:
-        try:
-            env_key = st.secrets.get("RAPIDAPI_KEY", "")
-        except Exception:
-            env_key = ""
-
-    api_key_input = st.text_input(
-        "RapidAPI key",
-        value=env_key,
-        type="password",
-        help=(
-            "Paste your key from rapidapi.com/jjrm365-kIFr3Nx_odV/api/tennis-api-atp-wta-itf  \n"
-            "Free tier (~500 req/month) is enough for normal use.  \n"
-            "Leave blank to fall back to Sackmann 2024 data."
-        ),
-    )
-
-    if api_key_input:
-        st.success("Live 2025/2026 data (RapidAPI)")
-        resolved_key: str | None = api_key_input
-    else:
-        st.warning("No key — using Sackmann 2024 data")
-        resolved_key = None
-
-    st.divider()
-    st.caption(
-        "Data: [API-Tennis (RapidAPI)](https://rapidapi.com/jjrm365-kIFr3Nx_odV/api/tennis-api-atp-wta-itf) "
-        "· fallback: [Sackmann tennis_atp](https://github.com/JeffSackmann/tennis_atp)"
-    )
+api_key: str | None = None
+try:
+    api_key = st.secrets.get("RAPIDAPI_KEY") or None
+except Exception:
+    pass
+if not api_key:
+    api_key = os.environ.get("RAPIDAPI_KEY") or None
 
 # ---------------------------------------------------------------------------
-# Player list (cached per API key so it only fetches once per session)
+# Player list (cached per API key)
 # ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner="Loading player list...")
-def _load_players(api_key: str) -> list[str]:
-    return get_player_names(api_key or None, top_n=500)
+def _load_players(key: str) -> list[str]:
+    return get_player_names(key or None, top_n=500)
 
-players = _load_players(resolved_key or "")
+players = _load_players(api_key or "")
 
-if resolved_key:
+if api_key:
     with st.expander(f"API debug — {len(players)} players loaded", expanded=False):
         st.caption("First 20 names returned by the API:")
         st.write(players[:20])
@@ -64,6 +43,14 @@ if resolved_key:
         if search_term:
             matches = [p for p in players if search_term.lower() in p.lower()]
             st.write(f"{len(matches)} match(es):", matches[:30])
+
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+
+for key in ("prompt_missing", "prompt_players", "prompt_cfg", "sim_result"):
+    if key not in st.session_state:
+        st.session_state[key] = None
 
 # ---------------------------------------------------------------------------
 # Main form
@@ -82,32 +69,85 @@ with col2:
 surface = st.selectbox("Surface", ["hard", "clay", "grass"], index=0)
 best_of = st.radio("Format", [3, 5], horizontal=True)
 
-if st.button("Run Simulation", type="primary", disabled=not (player_a and player_b)):
-    with st.spinner(f"Fetching stats and simulating {player_a} vs {player_b}..."):
-        cfg = MatchConfig(surface=surface, best_of=best_of)
+# ---------------------------------------------------------------------------
+# Helper: run simulation and store result
+# ---------------------------------------------------------------------------
+
+def _run_sim(pa: str, pb: str, cfg: MatchConfig, key: str | None):
+    with st.spinner(f"Simulating {pa} vs {pb}…"):
         try:
-            result = predict_match_by_name(player_a, player_b, cfg, api_key=resolved_key)
+            st.session_state.sim_result = predict_match_by_name(pa, pb, cfg, api_key=key)
         except Exception as e:
             st.error(f"Error: {e}")
-            st.stop()
 
+# ---------------------------------------------------------------------------
+# Run button
+# ---------------------------------------------------------------------------
+
+if st.button("Run Simulation", type="primary", disabled=not (player_a and player_b)):
+    cfg = MatchConfig(surface=surface, best_of=best_of)
+    st.session_state.sim_result = None
+
+    # Pre-check: are both players resolvable in the live API?
+    missing = []
+    if api_key:
+        with st.spinner("Checking live player data…"):
+            try:
+                rankings = _get_rankings(api_key)
+                for name in (player_a, player_b):
+                    if _find_in_rankings(name, rankings) is None:
+                        missing.append(name)
+            except Exception:
+                missing = [player_a, player_b]
+
+    if missing:
+        st.session_state.prompt_missing = missing
+        st.session_state.prompt_players = (player_a, player_b)
+        st.session_state.prompt_cfg = cfg
+    else:
+        _run_sim(player_a, player_b, cfg, api_key)
+
+# ---------------------------------------------------------------------------
+# Sackmann fallback prompt
+# ---------------------------------------------------------------------------
+
+if st.session_state.prompt_missing:
+    missing_str = " and ".join(f"**{n}**" for n in st.session_state.prompt_missing)
+    st.warning(
+        f"{missing_str} could not be found in the live API. "
+        "Use Sackmann 2024 data instead?"
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Yes — use Sackmann 2024", type="primary"):
+            pa, pb = st.session_state.prompt_players
+            cfg = st.session_state.prompt_cfg
+            st.session_state.prompt_missing = None
+            _run_sim(pa, pb, cfg, None)
+    with c2:
+        if st.button("Cancel"):
+            st.session_state.prompt_missing = None
+
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+result = st.session_state.sim_result
+if result:
     st.divider()
 
     for w in result.warnings:
         st.warning(w)
 
-    # Win probabilities
     c1, c2 = st.columns(2)
     with c1:
         st.metric(result.player_a, f"{result.win_prob_a * 100:.1f}%")
     with c2:
         st.metric(result.player_b, f"{result.win_prob_b * 100:.1f}%")
 
-    # Progress bars
     st.progress(result.win_prob_a, text=result.player_a)
     st.progress(result.win_prob_b, text=result.player_b)
 
-    # Score distribution
     st.subheader("Score Distribution")
     import pandas as pd
     raw = sorted(result.set_distribution.items(), key=lambda x: -x[1])

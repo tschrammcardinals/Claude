@@ -731,8 +731,8 @@ def _build_player_stats(
         first_serve_in=max(0.40, min(0.80, serve_data["first_serve_in"])),
         first_serve_won=max(0.50, min(0.90, serve_data["first_serve_won"])),
         second_serve_won=max(0.35, min(0.70, serve_data["second_serve_won"])),
-        return_adj=max(-0.15, min(0.10, return_adj)),
-        skill_adj=max(-0.12, min(0.12, skill_adj + surface_adj)),
+        return_adj=max(-0.05, min(0.05, return_adj)),
+        skill_adj=max(-0.03, min(0.03, skill_adj + surface_adj)),
         data_fetched=data_fetched,
     )
 
