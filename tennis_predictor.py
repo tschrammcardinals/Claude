@@ -511,9 +511,13 @@ def _get_rankings(api_key: str) -> list[dict]:
     if _rankings_cache is not None:
         return _rankings_cache
     data = _api_get("/tennis/v2/atp/ranking/singles/", api_key)
-    _rankings_cache = (data or {}).get("data", [])
-    print(f"  [RapidAPI] Rankings loaded: {len(_rankings_cache)} players (live {datetime.date.today()})")
-    return _rankings_cache
+    result = (data or {}).get("data", [])
+    if result:
+        _rankings_cache = result
+        print(f"  [RapidAPI] Rankings loaded: {len(_rankings_cache)} players (live {datetime.date.today()})")
+    else:
+        print(f"  [RapidAPI] Rankings returned empty — response keys: {list((data or {}).keys())}")
+    return result
 
 
 def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
@@ -1036,11 +1040,14 @@ def get_player_names(api_key: Optional[str] = None, top_n: int = 500) -> list[st
     resolved_key = api_key or _get_api_key()
     if resolved_key:
         rankings = _get_rankings(resolved_key)
-        return [
+        names = [
             entry["player"]["name"]
             for entry in rankings[:top_n]
             if entry.get("player", {}).get("name")
         ]
+        if names:
+            return names
+        # API returned empty — fall through to Sackmann fallback
     # Sackmann fallback: join atp_rankings_current with atp_players
     id_to_name: dict[str, str] = {}
     for row in _fetch_csv("atp_players.csv"):
