@@ -963,20 +963,27 @@ def predict_match_by_name(
             serve_source_b = "Sackmann 2024"
 
         # ── Ranking fallback: use Sackmann if not in live list ───────────────
+        sack_pid_a = None
+        sack_pid_b = None
         if rank_a is None:
-            pid = _find_player_id_sackmann(player_a_name)
-            rank_a = _get_ranking_sackmann(pid) if pid else None
+            sack_pid_a = _find_player_id_sackmann(player_a_name)
+            rank_a = _get_ranking_sackmann(sack_pid_a) if sack_pid_a else None
         if rank_b is None:
-            pid = _find_player_id_sackmann(player_b_name)
-            rank_b = _get_ranking_sackmann(pid) if pid else None
+            sack_pid_b = _find_player_id_sackmann(player_b_name)
+            rank_b = _get_ranking_sackmann(sack_pid_b) if sack_pid_b else None
+
+        # data_fetched=False only when the player is unknown everywhere
+        # (not in live rankings AND not in Sackmann) — i.e. pure ATP averages.
+        found_a = entry_a is not None or sack_pid_a is not None
+        found_b = entry_b is not None or sack_pid_b is not None
 
         player_a = _build_player_stats(
             player_a_name, rank_a, final_a,
-            data_fetched=entry_a is not None, surface_adj=surf_adj_a,
+            data_fetched=found_a, surface_adj=surf_adj_a,
         )
         player_b = _build_player_stats(
             player_b_name, rank_b, final_b,
-            data_fetched=entry_b is not None, surface_adj=surf_adj_b,
+            data_fetched=found_b, surface_adj=surf_adj_b,
         )
 
         print(f"  [RapidAPI] {player_a_name}: rank={rank_a or '?'}  "
@@ -1016,7 +1023,7 @@ def predict_match_by_name(
     for p, src in ((player_a, serve_source_a), (player_b, serve_source_b)):
         if not p.data_fetched:
             result.warnings.append(
-                f"'{p.name}' not found in live rankings — serve stats may be stale."
+                f"'{p.name}' not found in any data source — using ATP average stats."
             )
         result.stats_summary.append(
             f"**{p.name}** — source: *{src}*  \n"
