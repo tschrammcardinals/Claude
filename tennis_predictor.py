@@ -12,32 +12,34 @@ Player statistics drive point-win probabilities, adjusted for:
   - Fatigue (later sets in long matches)
   - Pressure situations (break points, set points, match points)
 
-Data source (with RAPIDAPI_KEY set):
-  API-Tennis on RapidAPI  —  tennis-api-atp-wta-itf.p.rapidapi.com
-  • /atp/ranking/singles/ → current ATP rankings + player IDs
-  • /atp/h2h/stats/{id_a}/{id_b}/ → serve/return stats from head-to-head matches
+Primary data source — Tennis Abstract (tennisabstract.com):
+  • atp_elo_ratings.html  → ATP player names, official rankings, surface Elo ratings
+  • wta_elo_ratings.html  → WTA player names, official rankings, surface Elo ratings
+  Surface Elo (hElo / cElo / gElo) drives per-surface skill adjustments.
+  Fetched once per session and cached in memory.
 
-  Serve stats from H2H are blended with Sackmann 2024 averages when the
-  two players have fewer than MIN_H2H_MATCHES head-to-head results.
+Serve / return statistics — Jeff Sackmann's tennis_atp + tennis_wta repos:
+  Weighted average of each player's last 20 matches (2023–2024 data).
+  Blended with tour averages when the sample is thin.
 
-Fallback (no key):
-  Jeff Sackmann's tennis_atp GitHub repo (data through Dec 2024).
+Fallback (player not found in Tennis Abstract):
+  Jeff Sackmann's ranking CSVs for rank-based skill adjustment.
+  Tour averages for serve stats when the player has no match history.
 
-Run `python tennis_predictor.py` to see a demo.
+Run `python tennis_predictor.py` for a demo.
 """
 
 import csv
 import datetime
 import io
-import json
 import math
 import os
 import random
 import statistics
 import unicodedata
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from html.parser import HTMLParser as _BaseHTMLParser
 from typing import Optional
 
 
@@ -389,7 +391,7 @@ def head_to_head_breakdown(
 
 
 # ---------------------------------------------------------------------------
-# ATP-tour averages (fallback defaults)
+# Tour averages
 # ---------------------------------------------------------------------------
 
 _ATP_AVG_FIRST_SERVE_IN   = 0.62
@@ -397,45 +399,42 @@ _ATP_AVG_FIRST_SERVE_WON  = 0.72
 _ATP_AVG_SECOND_SERVE_WON = 0.52
 _ATP_AVG_RETURN_WON       = 0.385
 
-# Minimum H2H matches required to trust H2H serve stats on their own.
-# Below this threshold we blend 50/50 with Sackmann 2024 averages.
-MIN_H2H_MATCHES = 5
+_WTA_AVG_FIRST_SERVE_IN   = 0.60
+_WTA_AVG_FIRST_SERVE_WON  = 0.63
+_WTA_AVG_SECOND_SERVE_WON = 0.47
+_WTA_AVG_RETURN_WON       = 0.400
 
-# Ranking → skill_adj calibration (rank 150 = 0 adjustment).
+# Ranking → skill_adj calibration (rank 150 = 0 adjustment)
 _ELO_BASE  = 1600.0
 _ELO_SCALE = 268.0
 _ELO_REF_RANK = 150
 _SKILL_ADJ_PER_ELO = 0.000251
 
 _STAT_LOOKBACK = 20
-_SACKMANN_MIN_MATCHES = 10  # blend with ATP averages when sample is thinner
+_SACKMANN_MIN_MATCHES = 10
+
 
 # ---------------------------------------------------------------------------
-# Name aliases
-# Maps the normalized form of what a user types → the name to search with.
-# Add entries here whenever a player's name in the API or Sackmann CSV
-# differs from the common English spelling.
+# Name normalisation + aliases
 # ---------------------------------------------------------------------------
+
 _NAME_ALIASES: dict[str, str] = {
-    # compound-surname players often typed with just one surname
-    "darwin blanch":    "Darwin Blanch Bernat",
+    "darwin blanch":        "Darwin Blanch Bernat",
     "alejandro davidovich": "Alejandro Davidovich Fokina",
-    "pedro cachin":     "Pedro Cachin",
-    "roberto bautista": "Roberto Bautista Agut",
-    "pablo carreno":    "Pablo Carreno Busta",
-    "albert ramos":     "Albert Ramos Vinolas",
-    "feliciano lopez":  "Feliciano Lopez",
+    "pedro cachin":         "Pedro Cachin",
+    "roberto bautista":     "Roberto Bautista Agut",
+    "pablo carreno":        "Pablo Carreno Busta",
+    "albert ramos":         "Albert Ramos Vinolas",
+    "feliciano lopez":      "Feliciano Lopez",
 }
 
 
 def _normalize(name: str) -> str:
-    # Strip accents, lowercase, collapse all whitespace variants to single space
     s = unicodedata.normalize("NFD", name).encode("ascii", "ignore").decode().lower()
     return " ".join(s.split())
 
 
 def _resolve_name(name: str) -> str:
-    """Return the canonical search name, applying any known alias."""
     return _NAME_ALIASES.get(_normalize(name), name)
 
 
@@ -446,374 +445,179 @@ def _ranking_to_skill_adj(ranking: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# API-Tennis (RapidAPI) integration
-# Docs: rapidapi.com/jjrm365-kIFr3Nx_odV/api/tennis-api-atp-wta-itf
-#
-# Endpoints used:
-#   GET /tennis/v2/atp/ranking/singles/
-#       → list of {position, point, player: {id, name, countryAcr}}
-#       Used to resolve player names → IDs and get current rankings.
-#
-#   GET /tennis/v2/atp/player/match-stats/{id}
-#       → overall player serve/return stats (large sample — primary source)
-#       Fields: firstServe / firstServeOf, winningOnFirstServe / ...Of,
-#               winningOnSecondServe / ...Of, returnPtsWin / returnPtsWinOf
-#
-#   GET /tennis/v2/atp/player/surface-summary/{id}
-#       → per-surface win/loss record used to derive a surface skill adj.
-#
-#   GET /tennis/v2/atp/h2h/stats/{id_a}/{id_b}/
-#       → {matchesCount, player1Stats: {...}, player2Stats: {...}}
-#       Kept as fallback when per-player match-stats are unavailable.
+# Tennis Abstract — Elo ratings (primary data source)
 # ---------------------------------------------------------------------------
 
-_RAPIDAPI_HOST = "tennis-api-atp-wta-itf.p.rapidapi.com"
-_RAPIDAPI_BASE = f"https://{_RAPIDAPI_HOST}"
+_TA_ATP_URL = "https://www.tennisabstract.com/reports/atp_elo_ratings.html"
+_TA_WTA_URL = "https://www.tennisabstract.com/reports/wta_elo_ratings.html"
 
-# Session-level cache: rankings list downloaded once per run.
-_rankings_cache: Optional[list] = None
+_ta_atp_cache: Optional[list[dict]] = None
+_ta_wta_cache: Optional[list[dict]] = None
 
 
-def _get_api_key() -> Optional[str]:
-    """Return RAPIDAPI_KEY from env or Streamlit secrets."""
-    key = os.environ.get("RAPIDAPI_KEY")
-    if key:
-        return key
+class _EloTableParser(_BaseHTMLParser):
+    """Extract data rows from the Tennis Abstract Elo ratings HTML table."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._in_tbody = False
+        self._in_row   = False
+        self._in_cell  = False
+        self._row_cells: list[str] = []
+        self._cell_buf  = ""
+        self.rows: list[list[str]] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tbody":
+            self._in_tbody = True
+        elif self._in_tbody and tag == "tr":
+            self._in_row = True
+            self._row_cells = []
+        elif self._in_row and tag == "td":
+            self._in_cell = True
+            self._cell_buf = ""
+
+    def handle_data(self, data):
+        if self._in_cell:
+            self._cell_buf += data
+
+    def handle_endtag(self, tag):
+        if tag == "td" and self._in_cell:
+            self._row_cells.append(self._cell_buf.replace("\xa0", " ").strip())
+            self._in_cell = False
+        elif tag == "tr" and self._in_row:
+            if len(self._row_cells) >= 16:
+                self.rows.append(self._row_cells)
+            self._in_row = False
+        elif tag == "tbody":
+            self._in_tbody = False
+
+
+def _fetch_ta_elo(url: str, tour: str) -> list[dict]:
+    """
+    Fetch and parse a Tennis Abstract Elo ratings page.
+    Returns a list of dicts: {name, elo_rank, elo, h_elo, c_elo, g_elo, rank, tour}.
+    Column layout (0-indexed):
+      0=EloRank  1=Name  2=Age  3=Elo  4=spacer
+      5=hEloRank 6=hElo  7=cEloRank  8=cElo  9=gEloRank  10=gElo
+      11=spacer  12=PeakElo  13=PeakMonth  14=spacer  15=OfficialRank  16=LogDiff
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        import streamlit as st
-        return st.secrets.get("RAPIDAPI_KEY")
-    except Exception:
-        return None
-
-
-def _api_get(path: str, api_key: str) -> Optional[dict]:
-    """GET a RapidAPI endpoint and return parsed JSON, or None on failure."""
-    req = urllib.request.Request(
-        _RAPIDAPI_BASE + path,
-        headers={
-            "X-RapidAPI-Key": api_key,
-            "X-RapidAPI-Host": _RAPIDAPI_HOST,
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html_src = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
-        print(f"  [RapidAPI] {path} failed: {e}")
-        return None
+        print(f"  [TennisAbstract] Failed to fetch {url}: {e}")
+        return []
 
+    parser = _EloTableParser()
+    parser.feed(html_src)
 
-_RANKINGS_CANDIDATE_PATHS = [
-    "/tennis/v2/atp/ranking/singles/",
-    "/atp/ranking/singles/",
-    "/v2/atp/ranking/singles/",
-    "/tennis/atp/ranking/singles/",
-    "/atp/ranking/singles",
-]
-
-
-def _get_rankings(api_key: str) -> list[dict]:
-    """
-    Fetch (and cache) the current ATP singles rankings.
-    Tries multiple endpoint path variants until one succeeds.
-    """
-    global _rankings_cache
-    if _rankings_cache is not None:
-        return _rankings_cache
-    for path in _RANKINGS_CANDIDATE_PATHS:
-        data = _api_get(path, api_key)
-        if data is None:
-            continue
-        result = data.get("data", [])
-        if result:
-            _rankings_cache = result
-            print(f"  [RapidAPI] Rankings loaded via {path}: {len(_rankings_cache)} players")
-            return _rankings_cache
-        print(f"  [RapidAPI] {path} responded but 'data' was empty — keys: {list(data.keys())}")
-    print("  [RapidAPI] All ranking endpoint variants failed.")
-    return []
-
-
-def debug_raw_rankings(api_key: str, sample_player: str = "Jannik Sinner") -> dict:
-    """Test ranking endpoints and player-search endpoints, returning status of each."""
-    key_preview = f"{api_key[:6]}…{api_key[-4:]}" if api_key else "None"
-    results = {"api_key_preview": key_preview, "ranking_endpoints": {}, "search_endpoints": {}}
-
-    def _probe(url: str) -> dict:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "X-RapidAPI-Key": api_key,
-                "X-RapidAPI-Host": _RAPIDAPI_HOST,
-                "Accept": "application/json",
-            },
-        )
+    results = []
+    for row in parser.rows:
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            raw_list = data.get("data", [])
-            return {
-                "status": "OK",
-                "top_level_keys": list(data.keys()),
-                "data_length": len(raw_list),
-                "first_entry": raw_list[0] if raw_list else None,
-            }
-        except Exception as e:
-            return {"status": f"ERROR: {type(e).__name__}: {e}"}
+            name = row[1].strip()
+            if not name:
+                continue
 
-    for path in _RANKINGS_CANDIDATE_PATHS:
-        results["ranking_endpoints"][path] = _probe(_RAPIDAPI_BASE + path)
+            def _float(s: str, default: float = 0.0) -> float:
+                try:
+                    return float(s)
+                except (ValueError, TypeError):
+                    return default
 
-    q = urllib.parse.quote(sample_player)
-    for path_template in _PLAYER_SEARCH_PATHS:
-        path = path_template.format(q=q)
-        results["search_endpoints"][path] = _probe(_RAPIDAPI_BASE + path)
+            def _int_or_none(s: str) -> Optional[int]:
+                try:
+                    return int(s)
+                except (ValueError, TypeError):
+                    return None
 
+            elo_rank = _int_or_none(row[0]) or 9999
+            elo      = _float(row[3])
+            h_elo    = _float(row[6],  elo)
+            c_elo    = _float(row[8],  elo)
+            g_elo    = _float(row[10], elo)
+            off_rank = _int_or_none(row[15])  # ATP or WTA official rank
+
+            # Use official rank when available, else fall back to Elo rank
+            rank = off_rank if off_rank else elo_rank
+
+            results.append({
+                "name":     name,
+                "elo_rank": elo_rank,
+                "elo":      elo,
+                "h_elo":    h_elo or elo,
+                "c_elo":    c_elo or elo,
+                "g_elo":    g_elo or elo,
+                "rank":     rank,
+                "tour":     tour,
+            })
+        except (IndexError, ValueError):
+            continue
+
+    print(f"  [TennisAbstract] Loaded {len(results)} {tour.upper()} players")
     return results
 
 
-def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
+def _get_ta_atp() -> list[dict]:
+    global _ta_atp_cache
+    if _ta_atp_cache is None:
+        _ta_atp_cache = _fetch_ta_elo(_TA_ATP_URL, "atp")
+    return _ta_atp_cache
+
+
+def _get_ta_wta() -> list[dict]:
+    global _ta_wta_cache
+    if _ta_wta_cache is None:
+        _ta_wta_cache = _fetch_ta_elo(_TA_WTA_URL, "wta")
+    return _ta_wta_cache
+
+
+def _find_in_ta(name: str, table: list[dict]) -> Optional[dict]:
     """
-    Find a player's ranking entry by name. Match strategy (in order):
-      1. Exact normalised match
-      2. All query words appear in the API name
-      3. Last name only (last word of query) appears as a whole word in API name
-    Applies _NAME_ALIASES before searching.
+    Find a player in a Tennis Abstract Elo table by name.
+    Match priority: exact → all words present → last name only.
     """
-    search = _resolve_name(name)
+    search    = _resolve_name(name)
     name_norm = _normalize(search)
     name_parts = name_norm.split()
-    last_name = name_parts[-1] if name_parts else ""
+    last_name  = name_parts[-1] if name_parts else ""
 
-    exact: Optional[dict] = None
-    partial: Optional[dict] = None
-    last_name_match: Optional[dict] = None
+    partial:   Optional[dict] = None
+    last_only: Optional[dict] = None
 
-    for entry in rankings:
-        pname = _normalize(entry.get("player", {}).get("name", ""))
+    for entry in table:
+        pname = _normalize(entry["name"])
         if pname == name_norm:
             return entry
         if partial is None and all(p in pname for p in name_parts):
             partial = entry
-        if last_name_match is None and last_name and last_name in pname.split():
-            last_name_match = entry
+        if last_only is None and last_name and last_name in pname.split():
+            last_only = entry
 
-    result = partial or last_name_match
-    if result is None and rankings:
-        print(f"  [RapidAPI] '{name}' not matched. "
-              f"Tried: exact='{name_norm}', parts={name_parts}. "
-              f"Search last_name='{last_name}'. "
-              f"Sample API names: {[_normalize(e.get('player', {}).get('name', '')) for e in rankings[:10]]}")
-    elif result is not None and result is last_name_match and partial is None:
-        print(f"  [RapidAPI] '{name}' matched via last-name only → "
-              f"'{result.get('player', {}).get('name', '')}'")
-    return result
+    return partial or last_only
 
 
-_PLAYER_SEARCH_PATHS = [
-    "/tennis/v2/atp/player/search/?name={q}",
-    "/tennis/v2/atp/players/search/?name={q}",
-    "/tennis/v2/player/search/?name={q}",
-]
-
-# Cache: player name → API player ID (or None if search failed)
-_player_id_cache: dict[str, Optional[str]] = {}
-
-
-def _search_player_id(name: str, api_key: str) -> Optional[str]:
+def _ta_surface_adj(entry: dict, surface: str) -> float:
     """
-    Try to resolve a player name to an API player ID via a search endpoint.
-    Used when the rankings endpoint is inaccessible (e.g. 403 Forbidden).
-    Returns the player ID string, or None if all search paths fail.
+    Compute a serve-point probability adjustment from Tennis Abstract surface Elo.
+    A higher surface Elo vs overall Elo → positive adjustment (player thrives here).
     """
-    cache_key = _normalize(name)
-    if cache_key in _player_id_cache:
-        return _player_id_cache[cache_key]
-
-    search = _resolve_name(name)
-    q = urllib.parse.quote(search)
-    for path_template in _PLAYER_SEARCH_PATHS:
-        data = _api_get(path_template.format(q=q), api_key)
-        if data is None:
-            continue
-        results = data.get("data", [])
-        if not results:
-            continue
-        # Pick the closest name match from results
-        name_norm = _normalize(search)
-        best = None
-        for r in results:
-            pname = _normalize(r.get("name", ""))
-            if pname == name_norm:
-                best = r
-                break
-            if best is None and all(p in pname for p in name_norm.split()):
-                best = r
-        if best is None:
-            best = results[0]
-        pid = str(best.get("id", ""))
-        if pid:
-            print(f"  [RapidAPI] Found '{name}' via player search → id={pid} ('{best.get('name', '')}')")
-            _player_id_cache[cache_key] = pid
-            return pid
-
-    print(f"  [RapidAPI] Player search failed for '{name}' — all paths returned empty.")
-    _player_id_cache[cache_key] = None
-    return None
-
-
-def _get_player_match_stats(player_id: str, api_key: str) -> Optional[dict]:
-    """
-    Fetch overall player match stats from /tennis/v2/atp/player/match-stats/{id}.
-    Returns the inner stats dict, or None on failure.
-    """
-    data = _api_get(f"/tennis/v2/atp/player/match-stats/{player_id}", api_key)
-    if not data:
-        return None
-    inner = data.get("data")
-    if isinstance(inner, list) and inner:
-        return inner[0]
-    if isinstance(inner, dict):
-        return inner
-    return None
-
-
-def _parse_player_serve_stats(stats: dict) -> Optional[dict]:
-    """
-    Extract serve/return fractions from a player/match-stats payload.
-    Uses the same field names as the H2H endpoint.
-    Returns None when the sample is too thin (< 50 serve points).
-    """
-    if not stats:
-        return None
-
-    def _i(key: str) -> int:
-        try:
-            return int(stats.get(key) or 0)
-        except (ValueError, TypeError):
-            return 0
-
-    def _r(num: int, den: int, default: float) -> float:
-        return num / den if den else default
-
-    fs_in     = _i("firstServe");          fs_of     = _i("firstServeOf")
-    fs_won    = _i("winningOnFirstServe");  fs_won_of = _i("winningOnFirstServeOf")
-    ss_won    = _i("winningOnSecondServe"); ss_of     = _i("winningOnSecondServeOf")
-    ret       = _i("returnPtsWin");         ret_of    = _i("returnPtsWinOf")
-
-    if fs_of < 50:  # sample too thin — fall through to Sackmann
-        return None
-
-    return {
-        "first_serve_in":   _r(fs_in,  fs_of,    _ATP_AVG_FIRST_SERVE_IN),
-        "first_serve_won":  _r(fs_won, fs_won_of, _ATP_AVG_FIRST_SERVE_WON),
-        "second_serve_won": _r(ss_won, ss_of,     _ATP_AVG_SECOND_SERVE_WON),
-        "return_won":       _r(ret,    ret_of,    _ATP_AVG_RETURN_WON),
-    }
-
-
-def _get_player_surface_summary(player_id: str, api_key: str):
-    """
-    Fetch player surface win/loss summary from
-    /tennis/v2/atp/player/surface-summary/{id}.
-    Returns the data payload (list or dict), or None on failure.
-    """
-    data = _api_get(f"/tennis/v2/atp/player/surface-summary/{player_id}", api_key)
-    if not data:
-        return None
-    return data.get("data")
-
-
-def _surface_skill_adj(surface_data, surface: str) -> float:
-    """
-    Derive a serve-point probability adjustment for *surface* from the
-    surface-summary payload.  Positive means the player performs above
-    their overall average on this surface; negative means below.
-    Returns 0.0 when data is missing or the sample is too thin (< 5 matches).
-
-    Scaling: a 10 percentage-point surface win-rate premium translates to
-    roughly +0.02 in serve-point probability.
-    """
-    if not surface_data:
+    overall = entry.get("elo", 0.0)
+    if not overall:
         return 0.0
-
-    # Normalise to {surface_name_lower: entry_dict}
-    surface_map: dict[str, dict] = {}
-    if isinstance(surface_data, list):
-        for entry in surface_data:
-            if isinstance(entry, dict):
-                s = str(entry.get("surface") or "").lower()
-                if s:
-                    surface_map[s] = entry
-    elif isinstance(surface_data, dict):
-        surface_map = {k.lower(): v for k, v in surface_data.items()}
-
-    def _i(d: dict, key: str) -> int:
-        try:
-            return int(d.get(key) or 0)
-        except (ValueError, TypeError):
-            return 0
-
-    entry = surface_map.get(surface.lower())
-    if not entry:
-        return 0.0
-
-    wins   = _i(entry, "wins")
-    losses = _i(entry, "losses")
-    n      = wins + losses
-    if n < 5:
-        return 0.0
-    surface_win_rate = wins / n
-
-    # Overall win rate across all surfaces
-    all_wins = all_losses = 0
-    for e in surface_map.values():
-        all_wins   += _i(e, "wins")
-        all_losses += _i(e, "losses")
-    all_n = all_wins + all_losses
-    if all_n < 10:
-        return 0.0
-    overall_win_rate = all_wins / all_n
-
-    delta = surface_win_rate - overall_win_rate
-    return max(-0.06, min(0.06, delta * 0.20))
+    surface_elo = {
+        "hard":   entry.get("h_elo", overall),
+        "clay":   entry.get("c_elo", overall),
+        "grass":  entry.get("g_elo", overall),
+        "carpet": entry.get("h_elo", overall),  # carpet treated as hard
+    }.get(surface, overall)
+    return max(-0.025, min(0.025, (surface_elo - overall) * _SKILL_ADJ_PER_ELO))
 
 
-def _h2h_serve_stats(h2h_player_entry: dict, n_h2h: int) -> dict:
-    """
-    Extract serve/return fractions from one side of an H2H stats response.
-
-    Uses raw point counts for accuracy.  When n_h2h < MIN_H2H_MATCHES
-    the caller blends the result with Sackmann 2024 averages.
-    """
-    def _i(key: str) -> int:
-        try:
-            return int(h2h_player_entry.get(key) or 0)
-        except (ValueError, TypeError):
-            return 0
-
-    def _r(num: int, den: int, default: float) -> float:
-        return num / den if den else default
-
-    fs_in  = _i("firstServe");        fs_of   = _i("firstServeOf")
-    fs_won = _i("winningOnFirstServe"); fs_won_of = _i("winningOnFirstServeOf")
-    ss_won = _i("winningOnSecondServe"); ss_of  = _i("winningOnSecondServeOf")
-    ret    = _i("returnPtsWin");       ret_of  = _i("returnPtsWinOf")
-
-    return {
-        "first_serve_in":   _r(fs_in,  fs_of,   _ATP_AVG_FIRST_SERVE_IN),
-        "first_serve_won":  _r(fs_won, fs_won_of, _ATP_AVG_FIRST_SERVE_WON),
-        "second_serve_won": _r(ss_won, ss_of,    _ATP_AVG_SECOND_SERVE_WON),
-        "return_won":       _r(ret,    ret_of,   _ATP_AVG_RETURN_WON),
-    }
-
-
-def _blend(h2h: dict, sackmann: dict, h2h_weight: float) -> dict:
-    """Weighted blend of H2H stats and Sackmann 2024 averages."""
-    w = max(0.0, min(1.0, h2h_weight))
-    return {k: w * h2h[k] + (1 - w) * sackmann[k] for k in h2h}
-
+# ---------------------------------------------------------------------------
+# Player stat assembly
+# ---------------------------------------------------------------------------
 
 def _build_player_stats(
     name: str,
@@ -822,13 +626,9 @@ def _build_player_stats(
     data_fetched: bool = True,
     surface_adj: float = 0.0,
 ) -> PlayerStats:
-    """Assemble a PlayerStats from a ranking + serve/return stat dict.
-
-    surface_adj is an additive adjustment derived from the player's
-    surface-specific win rate vs their overall win rate.
-    """
+    avg_return = serve_data.get("_avg_return_won", _ATP_AVG_RETURN_WON)
     skill_adj  = _ranking_to_skill_adj(ranking) if ranking else 0.0
-    return_adj = _ATP_AVG_RETURN_WON - serve_data["return_won"]
+    return_adj = avg_return - serve_data["return_won"]
     return PlayerStats(
         name=name,
         first_serve_in=max(0.40, min(0.80, serve_data["first_serve_in"])),
@@ -841,10 +641,12 @@ def _build_player_stats(
 
 
 # ---------------------------------------------------------------------------
-# Sackmann 2024 fallback (used when no API key, or to supplement thin H2H)
+# Sackmann CSV helpers (serve stats + fallback rankings)
 # ---------------------------------------------------------------------------
 
-_SACKMANN_BASE = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master"
+_SACKMANN_ATP_BASE = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master"
+_SACKMANN_WTA_BASE = "https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master"
+
 _csv_cache: dict[str, list[dict]] = {}
 
 _LEVEL_WEIGHTS_SK: dict[str, float] = {
@@ -852,28 +654,31 @@ _LEVEL_WEIGHTS_SK: dict[str, float] = {
 }
 
 
-def _fetch_csv(filename: str) -> list[dict]:
-    if filename in _csv_cache:
-        return _csv_cache[filename]
+def _fetch_csv(filename: str, base: str = _SACKMANN_ATP_BASE) -> list[dict]:
+    cache_key = f"{base}/{filename}"
+    if cache_key in _csv_cache:
+        return _csv_cache[cache_key]
     req = urllib.request.Request(
-        f"{_SACKMANN_BASE}/{filename}", headers={"User-Agent": "python-urllib/3"}
+        f"{base}/{filename}", headers={"User-Agent": "python-urllib/3"}
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             rows = list(csv.DictReader(io.StringIO(resp.read().decode("utf-8"))))
-        _csv_cache[filename] = rows
+        _csv_cache[cache_key] = rows
         return rows
     except Exception:
-        _csv_cache[filename] = []
+        _csv_cache[cache_key] = []
         return []
 
 
-def _find_player_id_sackmann(name: str) -> Optional[str]:
-    search = _resolve_name(name)
+def _find_player_id_sackmann(name: str, tour: str = "atp") -> Optional[str]:
+    base      = _SACKMANN_WTA_BASE if tour == "wta" else _SACKMANN_ATP_BASE
+    players_f = "wta_players.csv"  if tour == "wta" else "atp_players.csv"
+    search    = _resolve_name(name)
     name_norm = _normalize(search)
     name_parts = name_norm.split()
     best: Optional[str] = None
-    for row in _fetch_csv("atp_players.csv"):
+    for row in _fetch_csv(players_f, base):
         full = f"{row.get('name_first', '')} {row.get('name_last', '')}".strip()
         fn = _normalize(full)
         if fn == name_norm:
@@ -883,8 +688,10 @@ def _find_player_id_sackmann(name: str) -> Optional[str]:
     return best
 
 
-def _get_ranking_sackmann(player_id: str) -> Optional[int]:
-    for row in _fetch_csv("atp_rankings_current.csv"):
+def _get_ranking_sackmann(player_id: str, tour: str = "atp") -> Optional[int]:
+    base      = _SACKMANN_WTA_BASE if tour == "wta" else _SACKMANN_ATP_BASE
+    rankings_f = "wta_rankings_current.csv" if tour == "wta" else "atp_rankings_current.csv"
+    for row in _fetch_csv(rankings_f, base):
         if row.get("player") == player_id:
             try:
                 return int(row["rank"])
@@ -893,19 +700,35 @@ def _get_ranking_sackmann(player_id: str) -> Optional[int]:
     return None
 
 
-def _sackmann_serve_stats(name: str) -> dict:
+def _sackmann_serve_stats(name: str, tour: str = "atp") -> dict:
     """
-    Return aggregated serve/return fractions from Sackmann 2024 data for *name*.
-    Falls back to ATP averages if the player is not found.
+    Return aggregated serve/return fractions from Sackmann 2023-2024 data.
+    Falls back to tour averages when the player has insufficient match history.
     """
-    player_id = _find_player_id_sackmann(name)
-    if not player_id:
-        return {
+    if tour == "wta":
+        avg = {
+            "first_serve_in":   _WTA_AVG_FIRST_SERVE_IN,
+            "first_serve_won":  _WTA_AVG_FIRST_SERVE_WON,
+            "second_serve_won": _WTA_AVG_SECOND_SERVE_WON,
+            "return_won":       _WTA_AVG_RETURN_WON,
+            "_avg_return_won":  _WTA_AVG_RETURN_WON,
+        }
+        base       = _SACKMANN_WTA_BASE
+        match_files = ["wta_matches_2024.csv", "wta_matches_2023.csv"]
+    else:
+        avg = {
             "first_serve_in":   _ATP_AVG_FIRST_SERVE_IN,
             "first_serve_won":  _ATP_AVG_FIRST_SERVE_WON,
             "second_serve_won": _ATP_AVG_SECOND_SERVE_WON,
             "return_won":       _ATP_AVG_RETURN_WON,
+            "_avg_return_won":  _ATP_AVG_RETURN_WON,
         }
+        base       = _SACKMANN_ATP_BASE
+        match_files = ["atp_matches_2024.csv", "atp_matches_2023.csv"]
+
+    player_id = _find_player_id_sackmann(name, tour)
+    if not player_id:
+        return avg
 
     acc: dict[str, float] = {k: 0.0 for k in (
         "fs_in", "fs_in_tot", "fs_won", "fs_won_tot",
@@ -919,8 +742,8 @@ def _sackmann_serve_stats(name: str) -> dict:
             return 0.0
 
     matches = []
-    for year in (2024, 2023):
-        for row in _fetch_csv(f"atp_matches_{year}.csv"):
+    for fname in match_files:
+        for row in _fetch_csv(fname, base):
             if row.get("winner_id") == player_id or row.get("loser_id") == player_id:
                 matches.append(row)
 
@@ -930,13 +753,13 @@ def _sackmann_serve_stats(name: str) -> dict:
         weight = _LEVEL_WEIGHTS_SK.get(row.get("tourney_level", ""), 0.5)
         px = "w_" if is_winner else "l_"
         ox = "l_" if is_winner else "w_"
-        svpt      = _f(row, f"{px}svpt")
-        first_in  = _f(row, f"{px}1stIn")
-        first_won = _f(row, f"{px}1stWon")
-        second_won= _f(row, f"{px}2ndWon")
+        svpt       = _f(row, f"{px}svpt")
+        first_in   = _f(row, f"{px}1stIn")
+        first_won  = _f(row, f"{px}1stWon")
+        second_won = _f(row, f"{px}2ndWon")
         if svpt > 0:
             acc["fs_in"]     += first_in * weight
-            acc["fs_in_tot"] += svpt * weight
+            acc["fs_in_tot"] += svpt     * weight
             if first_in > 0:
                 acc["fs_won"]     += first_won * weight
                 acc["fs_won_tot"] += first_in  * weight
@@ -955,21 +778,16 @@ def _sackmann_serve_stats(name: str) -> dict:
         return acc[n] / acc[d] if acc[d] else default
 
     stats = {
-        "first_serve_in":   ratio("fs_in",  "fs_in_tot",  _ATP_AVG_FIRST_SERVE_IN),
-        "first_serve_won":  ratio("fs_won",  "fs_won_tot", _ATP_AVG_FIRST_SERVE_WON),
-        "second_serve_won": ratio("ss_won",  "ss_won_tot", _ATP_AVG_SECOND_SERVE_WON),
-        "return_won":       ratio("ret_won", "ret_tot",    _ATP_AVG_RETURN_WON),
+        "first_serve_in":   ratio("fs_in",  "fs_in_tot",  avg["first_serve_in"]),
+        "first_serve_won":  ratio("fs_won",  "fs_won_tot", avg["first_serve_won"]),
+        "second_serve_won": ratio("ss_won",  "ss_won_tot", avg["second_serve_won"]),
+        "return_won":       ratio("ret_won", "ret_tot",    avg["return_won"]),
+        "_avg_return_won":  avg["return_won"],
     }
     n_matches = len(matches[:_STAT_LOOKBACK])
     if n_matches < _SACKMANN_MIN_MATCHES:
         w = n_matches / _SACKMANN_MIN_MATCHES
-        atp = {
-            "first_serve_in":   _ATP_AVG_FIRST_SERVE_IN,
-            "first_serve_won":  _ATP_AVG_FIRST_SERVE_WON,
-            "second_serve_won": _ATP_AVG_SECOND_SERVE_WON,
-            "return_won":       _ATP_AVG_RETURN_WON,
-        }
-        return {k: w * stats[k] + (1 - w) * atp[k] for k in stats}
+        return {k: w * stats[k] + (1 - w) * avg.get(k, stats[k]) for k in stats}
     return stats
 
 
@@ -982,174 +800,114 @@ def predict_match_by_name(
     player_b_name: str,
     config: MatchConfig,
     n_simulations: int = DEFAULT_SIMULATIONS,
-    api_key: Optional[str] = None,
+    use_sackmann: bool = False,
 ) -> SimulationResult:
     """
     Predict a match outcome by player name.
 
-    With a RapidAPI key
-    ─────────────────
-    1. Fetches the live ATP rankings list (cached) to resolve names → IDs
-       and get current ATP rankings.
-    2. Fetches per-player overall match stats (/player/match-stats/{id}) as
-       the primary serve/return stat source — much larger sample than H2H.
-    3. Fetches per-player surface summary (/player/surface-summary/{id}) to
-       compute a surface-specific skill adjustment for this match's surface.
-    4. Falls back to H2H stats (/h2h/stats/{id_a}/{id_b}/) when per-player
-       match stats are unavailable, blending with Sackmann 2024 for thin samples.
-    5. skill_adj is always derived from the live ATP ranking (never from H2H).
+    Primary path (use_sackmann=False)
+    ──────────────────────────────────
+    1. Looks up each player in Tennis Abstract ATP then WTA Elo tables.
+    2. Derives a surface-specific skill adjustment from hElo / cElo / gElo.
+    3. Fetches serve/return stats from Sackmann 2023–2024 match CSVs.
+    4. Falls back to Sackmann ranking CSVs for the rank-based skill_adj when
+       the player has no Tennis Abstract entry.
 
-    Without a key (fallback)
-    ─────────────────────────
-    Uses Jeff Sackmann's tennis_atp dataset (data through Dec 2024).
+    Sackmann path (use_sackmann=True)
+    ───────────────────────────────────
+    Skips Tennis Abstract entirely; uses Sackmann rankings + serve stats.
+    Triggered when the user selects the Sackmann fallback in the UI.
     """
-    resolved_key = api_key or _get_api_key()
-
-    # These are set in both branches so stats_summary can reference them.
     serve_source_a = serve_source_b = "Sackmann 2024"
 
-    if resolved_key:
-        rankings = _get_rankings(resolved_key)
-        entry_a  = _find_in_rankings(player_a_name, rankings)
-        entry_b  = _find_in_rankings(player_b_name, rankings)
+    if not use_sackmann:
+        ta_atp = _get_ta_atp()
+        ta_wta = _get_ta_wta()
 
-        if not entry_a:
-            print(f"  [RapidAPI] '{player_a_name}' not found in rankings — trying player search.")
-        if not entry_b:
-            print(f"  [RapidAPI] '{player_b_name}' not found in rankings — trying player search.")
+        def _lookup(name: str):
+            e = _find_in_ta(name, ta_atp)
+            if e:
+                return e
+            return _find_in_ta(name, ta_wta)
 
-        id_a   = entry_a["player"]["id"] if entry_a else None
-        id_b   = entry_b["player"]["id"] if entry_b else None
-        rank_a = entry_a["position"]     if entry_a else None
-        rank_b = entry_b["position"]     if entry_b else None
+        entry_a = _lookup(player_a_name)
+        entry_b = _lookup(player_b_name)
 
-        # If rankings were empty (e.g. 403) try resolving IDs via player search
-        if id_a is None:
-            id_a = _search_player_id(player_a_name, resolved_key)
-        if id_b is None:
-            id_b = _search_player_id(player_b_name, resolved_key)
+        tour_a = entry_a["tour"] if entry_a else "atp"
+        tour_b = entry_b["tour"] if entry_b else "atp"
 
-        # ── Per-player overall match stats (primary serve stats source) ─────
-        api_stats_a: Optional[dict] = None
-        api_stats_b: Optional[dict] = None
-        if id_a:
-            raw = _get_player_match_stats(str(id_a), resolved_key)
-            api_stats_a = _parse_player_serve_stats(raw) if raw else None
-        if id_b:
-            raw = _get_player_match_stats(str(id_b), resolved_key)
-            api_stats_b = _parse_player_serve_stats(raw) if raw else None
+        rank_a = entry_a["rank"] if entry_a else None
+        rank_b = entry_b["rank"] if entry_b else None
 
-        # ── Surface-specific skill adjustments ──────────────────────────────
-        surf_adj_a = surf_adj_b = 0.0
-        if id_a:
-            surf_data_a = _get_player_surface_summary(str(id_a), resolved_key)
-            surf_adj_a  = _surface_skill_adj(surf_data_a, config.surface)
-        if id_b:
-            surf_data_b = _get_player_surface_summary(str(id_b), resolved_key)
-            surf_adj_b  = _surface_skill_adj(surf_data_b, config.surface)
+        surf_adj_a = _ta_surface_adj(entry_a, config.surface) if entry_a else 0.0
+        surf_adj_b = _ta_surface_adj(entry_b, config.surface) if entry_b else 0.0
 
-        # ── H2H stats — fallback when per-player stats are missing ──────────
-        n_h2h   = 0
-        h2h_a   = None
-        h2h_b   = None
-        if id_a and id_b and (api_stats_a is None or api_stats_b is None):
-            h2h_data = _api_get(f"/tennis/v2/atp/h2h/stats/{id_a}/{id_b}/", resolved_key)
-            if h2h_data:
-                h2h = h2h_data.get("data", {})
-                n_h2h = int(h2h.get("matchesCount") or 0)
-                if n_h2h > 0:
-                    h2h_a = _h2h_serve_stats(h2h.get("player1Stats", {}), n_h2h)
-                    h2h_b = _h2h_serve_stats(h2h.get("player2Stats", {}), n_h2h)
+        # Serve stats always from Sackmann; tour is now known from TA lookup
+        sk_a = _sackmann_serve_stats(player_a_name, tour_a)
+        sk_b = _sackmann_serve_stats(player_b_name, tour_b)
 
-        # ── Sackmann 2024 baseline ───────────────────────────────────────────
-        sk_a = _sackmann_serve_stats(player_a_name)
-        sk_b = _sackmann_serve_stats(player_b_name)
-
-        # ── Select best available serve stats per player ─────────────────────
-        # Priority: player/match-stats > H2H blend > Sackmann
-        h2h_weight = min(1.0, n_h2h / MIN_H2H_MATCHES)
-
-        if api_stats_a is not None:
-            final_a = api_stats_a
-            serve_source_a = "match-stats (live)"
-        elif h2h_a is not None:
-            final_a = _blend(h2h_a, sk_a, h2h_weight)
-            serve_source_a = f"H2H ({n_h2h} matches) + Sackmann blend"
-        else:
-            final_a = sk_a
-            serve_source_a = "Sackmann 2024"
-
-        if api_stats_b is not None:
-            final_b = api_stats_b
-            serve_source_b = "match-stats (live)"
-        elif h2h_b is not None:
-            final_b = _blend(h2h_b, sk_b, h2h_weight)
-            serve_source_b = f"H2H ({n_h2h} matches) + Sackmann blend"
-        else:
-            final_b = sk_b
-            serve_source_b = "Sackmann 2024"
-
-        # ── Ranking fallback: use Sackmann if not in live list ───────────────
-        sack_pid_a = None
-        sack_pid_b = None
+        # Ranking fallback: Sackmann ranking CSVs if not in TA
         if rank_a is None:
-            sack_pid_a = _find_player_id_sackmann(player_a_name)
-            rank_a = _get_ranking_sackmann(sack_pid_a) if sack_pid_a else None
+            pid = _find_player_id_sackmann(player_a_name, tour_a)
+            rank_a = _get_ranking_sackmann(pid, tour_a) if pid else None
         if rank_b is None:
-            sack_pid_b = _find_player_id_sackmann(player_b_name)
-            rank_b = _get_ranking_sackmann(sack_pid_b) if sack_pid_b else None
+            pid = _find_player_id_sackmann(player_b_name, tour_b)
+            rank_b = _get_ranking_sackmann(pid, tour_b) if pid else None
 
-        # data_fetched=False only when the player is unknown everywhere
-        # (not in live rankings AND not in Sackmann) — i.e. pure ATP averages.
-        found_a = entry_a is not None or sack_pid_a is not None
-        found_b = entry_b is not None or sack_pid_b is not None
+        found_a = entry_a is not None
+        found_b = entry_b is not None
 
         player_a = _build_player_stats(
-            player_a_name, rank_a, final_a,
+            player_a_name, rank_a, sk_a,
             data_fetched=found_a, surface_adj=surf_adj_a,
         )
         player_b = _build_player_stats(
-            player_b_name, rank_b, final_b,
+            player_b_name, rank_b, sk_b,
             data_fetched=found_b, surface_adj=surf_adj_b,
         )
 
-        print(f"  [RapidAPI] {player_a_name}: rank={rank_a or '?'}  "
+        src_a = f"Tennis Abstract ({tour_a.upper()}) + Sackmann serve stats"
+        src_b = f"Tennis Abstract ({tour_b.upper()}) + Sackmann serve stats"
+        if not found_a:
+            src_a = "Sackmann 2024 (not in Tennis Abstract)"
+        if not found_b:
+            src_b = "Sackmann 2024 (not in Tennis Abstract)"
+
+        serve_source_a = src_a
+        serve_source_b = src_b
+
+        print(f"  [TA] {player_a_name}: rank={rank_a or '?'}  "
               f"fs_in={player_a.first_serve_in:.3f}  fs_won={player_a.first_serve_won:.3f}  "
               f"ss_won={player_a.second_serve_won:.3f}  skill={player_a.skill_adj:+.4f}  "
               f"surfAdj={surf_adj_a:+.4f}  src={serve_source_a}")
-        print(f"  [RapidAPI] {player_b_name}: rank={rank_b or '?'}  "
+        print(f"  [TA] {player_b_name}: rank={rank_b or '?'}  "
               f"fs_in={player_b.first_serve_in:.3f}  fs_won={player_b.first_serve_won:.3f}  "
               f"ss_won={player_b.second_serve_won:.3f}  skill={player_b.skill_adj:+.4f}  "
               f"surfAdj={surf_adj_b:+.4f}  src={serve_source_b}")
 
     else:
-        # ── Pure Sackmann 2024 fallback ──────────────────────────────────────
-        sk_a = _sackmann_serve_stats(player_a_name)
-        sk_b = _sackmann_serve_stats(player_b_name)
+        # ── Pure Sackmann fallback ────────────────────────────────────────────
+        sk_a = _sackmann_serve_stats(player_a_name, "atp")
+        sk_b = _sackmann_serve_stats(player_b_name, "atp")
 
-        pid_a = _find_player_id_sackmann(player_a_name)
-        pid_b = _find_player_id_sackmann(player_b_name)
-        rank_a = _get_ranking_sackmann(pid_a) if pid_a else None
-        rank_b = _get_ranking_sackmann(pid_b) if pid_b else None
+        pid_a  = _find_player_id_sackmann(player_a_name, "atp")
+        pid_b  = _find_player_id_sackmann(player_b_name, "atp")
+        rank_a = _get_ranking_sackmann(pid_a, "atp") if pid_a else None
+        rank_b = _get_ranking_sackmann(pid_b, "atp") if pid_b else None
 
         player_a = _build_player_stats(player_a_name, rank_a, sk_a, data_fetched=pid_a is not None)
         player_b = _build_player_stats(player_b_name, rank_b, sk_b, data_fetched=pid_b is not None)
 
-        print(f"  [Sackmann-2024] {player_a_name}: rank={rank_a or '?'}  skill={player_a.skill_adj:+.4f}")
-        print(f"  [Sackmann-2024] {player_b_name}: rank={rank_b or '?'}  skill={player_b.skill_adj:+.4f}")
+        print(f"  [Sackmann] {player_a_name}: rank={rank_a or '?'}  skill={player_a.skill_adj:+.4f}")
+        print(f"  [Sackmann] {player_b_name}: rank={rank_b or '?'}  skill={player_b.skill_adj:+.4f}")
 
-    # ── Run simulation ───────────────────────────────────────────────────────
+    # ── Run simulation ────────────────────────────────────────────────────────
     result = run_simulation(player_a, player_b, config, n_simulations)
-
-    if not resolved_key:
-        result.warnings.append(
-            "No RAPIDAPI_KEY set — using Sackmann 2024 data (last updated Dec 2024)."
-        )
 
     for p, src in ((player_a, serve_source_a), (player_b, serve_source_b)):
         if not p.data_fetched:
             result.warnings.append(
-                f"'{p.name}' not found in any data source — using ATP average stats."
+                f"'{p.name}' not found in any data source — using tour average stats."
             )
         result.stats_summary.append(
             f"**{p.name}** — source: *{src}*  \n"
@@ -1165,33 +923,34 @@ def predict_match_by_name(
 # Player list (used to populate UI dropdowns)
 # ---------------------------------------------------------------------------
 
-def get_player_names(api_key: Optional[str] = None, top_n: int = 500) -> list[str]:
+def get_player_names(top_n: int = 500) -> list[str]:
     """
-    Return up to top_n ATP player names in rank order.
-    Uses live rankings if api_key is provided, else Sackmann fallback.
+    Return up to top_n ATP and top_n WTA player names sorted by official rank.
+    Primary source: Tennis Abstract Elo pages.
+    Fallback: Sackmann ranking CSVs (ATP only) when Tennis Abstract is unavailable.
     """
-    resolved_key = api_key or _get_api_key()
-    if resolved_key:
-        rankings = _get_rankings(resolved_key)
-        names = [
-            entry["player"]["name"]
-            for entry in rankings[:top_n]
-            if entry.get("player", {}).get("name")
-        ]
-        if names:
-            return names
-        # API returned empty — fall through to Sackmann fallback
-    # Sackmann fallback: join atp_rankings_current with atp_players
+    atp_players = _get_ta_atp()
+    wta_players = _get_ta_wta()
+
+    def _sorted_names(players: list[dict]) -> list[str]:
+        ranked = sorted(players, key=lambda e: (e["rank"], e["elo_rank"]))
+        return [e["name"] for e in ranked[:top_n]]
+
+    atp_names = _sorted_names(atp_players)
+    wta_names = _sorted_names(wta_players)
+
+    if atp_names or wta_names:
+        return atp_names + wta_names
+
+    # Sackmann fallback (ATP only) if Tennis Abstract is unreachable
+    print("  [TennisAbstract] Both Elo pages failed — falling back to Sackmann ATP.")
     id_to_name: dict[str, str] = {}
     for row in _fetch_csv("atp_players.csv"):
         pid = row.get("player_id", "")
         if pid:
-            first = row.get("name_first", "")
-            last = row.get("name_last", "")
-            id_to_name[pid] = f"{first} {last}".strip()
-    # atp_rankings_current.csv has one row per player per week — use only
-    # the latest ranking date to avoid filling the dropdown with duplicates.
-    all_rows = _fetch_csv("atp_rankings_current.csv")
+            id_to_name[pid] = f"{row.get('name_first','')} {row.get('name_last','')}".strip()
+
+    all_rows   = _fetch_csv("atp_rankings_current.csv")
     latest_date = max(
         (r.get("ranking_date", "") for r in all_rows if r.get("ranking_date")),
         default="",
@@ -1212,6 +971,13 @@ def get_player_names(api_key: Optional[str] = None, top_n: int = 500) -> list[st
         ranked.append((rank, id_to_name[pid]))
     ranked.sort()
     return [name for _, name in ranked[:top_n]]
+
+
+def ta_player_lookup(name: str) -> Optional[dict]:
+    """Return the Tennis Abstract Elo entry for *name*, or None if not found."""
+    atp = _get_ta_atp()
+    wta = _get_ta_wta()
+    return _find_in_ta(name, atp) or _find_in_ta(name, wta)
 
 
 # ---------------------------------------------------------------------------
