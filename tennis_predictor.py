@@ -522,24 +522,40 @@ def _get_rankings(api_key: str) -> list[dict]:
 
 def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
     """
-    Find a player's ranking entry by name (exact normalised match first,
-    then first entry where all query words appear in the player name).
+    Find a player's ranking entry by name. Match strategy (in order):
+      1. Exact normalised match
+      2. All query words appear in the API name
+      3. Last name only (last word of query) appears as a whole word in API name
     Applies _NAME_ALIASES before searching.
     """
     search = _resolve_name(name)
     name_norm = _normalize(search)
     name_parts = name_norm.split()
-    best: Optional[dict] = None
+    last_name = name_parts[-1] if name_parts else ""
+
+    exact: Optional[dict] = None
+    partial: Optional[dict] = None
+    last_name_match: Optional[dict] = None
+
     for entry in rankings:
         pname = _normalize(entry.get("player", {}).get("name", ""))
         if pname == name_norm:
             return entry
-        if best is None and all(p in pname for p in name_parts):
-            best = entry
-    if best is None and rankings:
-        sample = [_normalize(e.get("player", {}).get("name", "")) for e in rankings[:8]]
-        print(f"  [RapidAPI] '{name}' not matched. Sample API names: {sample}")
-    return best
+        if partial is None and all(p in pname for p in name_parts):
+            partial = entry
+        if last_name_match is None and last_name and last_name in pname.split():
+            last_name_match = entry
+
+    result = partial or last_name_match
+    if result is None and rankings:
+        print(f"  [RapidAPI] '{name}' not matched. "
+              f"Tried: exact='{name_norm}', parts={name_parts}. "
+              f"Search last_name='{last_name}'. "
+              f"Sample API names: {[_normalize(e.get('player', {}).get('name', '')) for e in rankings[:10]]}")
+    elif result is last_name_match and partial is None:
+        print(f"  [RapidAPI] '{name}' matched via last-name only → "
+              f"'{result.get('player', {}).get('name', '')}'")
+    return result
 
 
 def _get_player_match_stats(player_id: str, api_key: str) -> Optional[dict]:
