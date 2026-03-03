@@ -428,7 +428,9 @@ _NAME_ALIASES: dict[str, str] = {
 
 
 def _normalize(name: str) -> str:
-    return unicodedata.normalize("NFD", name).encode("ascii", "ignore").decode().lower().strip()
+    # Strip accents, lowercase, collapse all whitespace variants to single space
+    s = unicodedata.normalize("NFD", name).encode("ascii", "ignore").decode().lower()
+    return " ".join(s.split())
 
 
 def _resolve_name(name: str) -> str:
@@ -552,7 +554,7 @@ def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
               f"Tried: exact='{name_norm}', parts={name_parts}. "
               f"Search last_name='{last_name}'. "
               f"Sample API names: {[_normalize(e.get('player', {}).get('name', '')) for e in rankings[:10]]}")
-    elif result is last_name_match and partial is None:
+    elif result is not None and result is last_name_match and partial is None:
         print(f"  [RapidAPI] '{name}' matched via last-name only → "
               f"'{result.get('player', {}).get('name', '')}'")
     return result
