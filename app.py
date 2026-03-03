@@ -56,6 +56,15 @@ def _load_players(api_key: str) -> list[str]:
 
 players = _load_players(resolved_key or "")
 
+if resolved_key:
+    with st.expander(f"API debug — {len(players)} players loaded", expanded=False):
+        st.caption("First 20 names returned by the API:")
+        st.write(players[:20])
+        search_term = st.text_input("Search for a player name in API list", key="debug_search")
+        if search_term:
+            matches = [p for p in players if search_term.lower() in p.lower()]
+            st.write(f"{len(matches)} match(es):", matches[:30])
+
 # ---------------------------------------------------------------------------
 # Main form
 # ---------------------------------------------------------------------------
