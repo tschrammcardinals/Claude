@@ -35,6 +35,7 @@ import os
 import random
 import statistics
 import unicodedata
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
@@ -534,12 +535,12 @@ def _get_rankings(api_key: str) -> list[dict]:
     return []
 
 
-def debug_raw_rankings(api_key: str) -> dict:
-    """Test all ranking endpoint variants and return what each one returns."""
+def debug_raw_rankings(api_key: str, sample_player: str = "Jannik Sinner") -> dict:
+    """Test ranking endpoints and player-search endpoints, returning status of each."""
     key_preview = f"{api_key[:6]}…{api_key[-4:]}" if api_key else "None"
-    results = {"api_key_preview": key_preview, "endpoints": {}}
-    for path in _RANKINGS_CANDIDATE_PATHS:
-        url = _RAPIDAPI_BASE + path
+    results = {"api_key_preview": key_preview, "ranking_endpoints": {}, "search_endpoints": {}}
+
+    def _probe(url: str) -> dict:
         req = urllib.request.Request(
             url,
             headers={
@@ -552,16 +553,23 @@ def debug_raw_rankings(api_key: str) -> dict:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
             raw_list = data.get("data", [])
-            results["endpoints"][path] = {
+            return {
                 "status": "OK",
                 "top_level_keys": list(data.keys()),
                 "data_length": len(raw_list),
                 "first_entry": raw_list[0] if raw_list else None,
             }
         except Exception as e:
-            results["endpoints"][path] = {
-                "status": f"ERROR: {type(e).__name__}: {e}",
-            }
+            return {"status": f"ERROR: {type(e).__name__}: {e}"}
+
+    for path in _RANKINGS_CANDIDATE_PATHS:
+        results["ranking_endpoints"][path] = _probe(_RAPIDAPI_BASE + path)
+
+    q = urllib.parse.quote(sample_player)
+    for path_template in _PLAYER_SEARCH_PATHS:
+        path = path_template.format(q=q)
+        results["search_endpoints"][path] = _probe(_RAPIDAPI_BASE + path)
+
     return results
 
 
@@ -601,6 +609,58 @@ def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
         print(f"  [RapidAPI] '{name}' matched via last-name only → "
               f"'{result.get('player', {}).get('name', '')}'")
     return result
+
+
+_PLAYER_SEARCH_PATHS = [
+    "/tennis/v2/atp/player/search/?name={q}",
+    "/tennis/v2/atp/players/search/?name={q}",
+    "/tennis/v2/player/search/?name={q}",
+]
+
+# Cache: player name → API player ID (or None if search failed)
+_player_id_cache: dict[str, Optional[str]] = {}
+
+
+def _search_player_id(name: str, api_key: str) -> Optional[str]:
+    """
+    Try to resolve a player name to an API player ID via a search endpoint.
+    Used when the rankings endpoint is inaccessible (e.g. 403 Forbidden).
+    Returns the player ID string, or None if all search paths fail.
+    """
+    cache_key = _normalize(name)
+    if cache_key in _player_id_cache:
+        return _player_id_cache[cache_key]
+
+    search = _resolve_name(name)
+    q = urllib.parse.quote(search)
+    for path_template in _PLAYER_SEARCH_PATHS:
+        data = _api_get(path_template.format(q=q), api_key)
+        if data is None:
+            continue
+        results = data.get("data", [])
+        if not results:
+            continue
+        # Pick the closest name match from results
+        name_norm = _normalize(search)
+        best = None
+        for r in results:
+            pname = _normalize(r.get("name", ""))
+            if pname == name_norm:
+                best = r
+                break
+            if best is None and all(p in pname for p in name_norm.split()):
+                best = r
+        if best is None:
+            best = results[0]
+        pid = str(best.get("id", ""))
+        if pid:
+            print(f"  [RapidAPI] Found '{name}' via player search → id={pid} ('{best.get('name', '')}')")
+            _player_id_cache[cache_key] = pid
+            return pid
+
+    print(f"  [RapidAPI] Player search failed for '{name}' — all paths returned empty.")
+    _player_id_cache[cache_key] = None
+    return None
 
 
 def _get_player_match_stats(player_id: str, api_key: str) -> Optional[dict]:
@@ -954,14 +1014,20 @@ def predict_match_by_name(
         entry_b  = _find_in_rankings(player_b_name, rankings)
 
         if not entry_a:
-            print(f"  [RapidAPI] '{player_a_name}' not found in rankings — using Sackmann fallback.")
+            print(f"  [RapidAPI] '{player_a_name}' not found in rankings — trying player search.")
         if not entry_b:
-            print(f"  [RapidAPI] '{player_b_name}' not found in rankings — using Sackmann fallback.")
+            print(f"  [RapidAPI] '{player_b_name}' not found in rankings — trying player search.")
 
         id_a   = entry_a["player"]["id"] if entry_a else None
         id_b   = entry_b["player"]["id"] if entry_b else None
         rank_a = entry_a["position"]     if entry_a else None
         rank_b = entry_b["position"]     if entry_b else None
+
+        # If rankings were empty (e.g. 403) try resolving IDs via player search
+        if id_a is None:
+            id_a = _search_player_id(player_a_name, resolved_key)
+        if id_b is None:
+            id_b = _search_player_id(player_b_name, resolved_key)
 
         # ── Per-player overall match stats (primary serve stats source) ─────
         api_stats_a: Optional[dict] = None
