@@ -451,13 +451,17 @@ def _ranking_to_skill_adj(ranking: int) -> float:
 #       → list of {position, point, player: {id, name, countryAcr}}
 #       Used to resolve player names → IDs and get current rankings.
 #
+#   GET /tennis/v2/atp/player/match-stats/{id}
+#       → overall player serve/return stats (large sample — primary source)
+#       Fields: firstServe / firstServeOf, winningOnFirstServe / ...Of,
+#               winningOnSecondServe / ...Of, returnPtsWin / returnPtsWinOf
+#
+#   GET /tennis/v2/atp/player/surface-summary/{id}
+#       → per-surface win/loss record used to derive a surface skill adj.
+#
 #   GET /tennis/v2/atp/h2h/stats/{id_a}/{id_b}/
 #       → {matchesCount, player1Stats: {...}, player2Stats: {...}}
-#       player*Stats fields used:
-#         firstServe / firstServeOf         → 1st serve in %
-#         winningOnFirstServe / ...Of       → 1st serve won %
-#         winningOnSecondServe / ...Of      → 2nd serve won %
-#         returnPtsWin / returnPtsWinOf     → return points won %
+#       Kept as fallback when per-player match-stats are unavailable.
 # ---------------------------------------------------------------------------
 
 _RAPIDAPI_HOST = "tennis-api-atp-wta-itf.p.rapidapi.com"
@@ -534,6 +538,123 @@ def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
     return best
 
 
+def _get_player_match_stats(player_id: str, api_key: str) -> Optional[dict]:
+    """
+    Fetch overall player match stats from /tennis/v2/atp/player/match-stats/{id}.
+    Returns the inner stats dict, or None on failure.
+    """
+    data = _api_get(f"/tennis/v2/atp/player/match-stats/{player_id}", api_key)
+    if not data:
+        return None
+    inner = data.get("data")
+    if isinstance(inner, list) and inner:
+        return inner[0]
+    if isinstance(inner, dict):
+        return inner
+    return None
+
+
+def _parse_player_serve_stats(stats: dict) -> Optional[dict]:
+    """
+    Extract serve/return fractions from a player/match-stats payload.
+    Uses the same field names as the H2H endpoint.
+    Returns None when the sample is too thin (< 50 serve points).
+    """
+    if not stats:
+        return None
+
+    def _i(key: str) -> int:
+        try:
+            return int(stats.get(key) or 0)
+        except (ValueError, TypeError):
+            return 0
+
+    def _r(num: int, den: int, default: float) -> float:
+        return num / den if den else default
+
+    fs_in     = _i("firstServe");          fs_of     = _i("firstServeOf")
+    fs_won    = _i("winningOnFirstServe");  fs_won_of = _i("winningOnFirstServeOf")
+    ss_won    = _i("winningOnSecondServe"); ss_of     = _i("winningOnSecondServeOf")
+    ret       = _i("returnPtsWin");         ret_of    = _i("returnPtsWinOf")
+
+    if fs_of < 50:  # sample too thin — fall through to Sackmann
+        return None
+
+    return {
+        "first_serve_in":   _r(fs_in,  fs_of,    _ATP_AVG_FIRST_SERVE_IN),
+        "first_serve_won":  _r(fs_won, fs_won_of, _ATP_AVG_FIRST_SERVE_WON),
+        "second_serve_won": _r(ss_won, ss_of,     _ATP_AVG_SECOND_SERVE_WON),
+        "return_won":       _r(ret,    ret_of,    _ATP_AVG_RETURN_WON),
+    }
+
+
+def _get_player_surface_summary(player_id: str, api_key: str):
+    """
+    Fetch player surface win/loss summary from
+    /tennis/v2/atp/player/surface-summary/{id}.
+    Returns the data payload (list or dict), or None on failure.
+    """
+    data = _api_get(f"/tennis/v2/atp/player/surface-summary/{player_id}", api_key)
+    if not data:
+        return None
+    return data.get("data")
+
+
+def _surface_skill_adj(surface_data, surface: str) -> float:
+    """
+    Derive a serve-point probability adjustment for *surface* from the
+    surface-summary payload.  Positive means the player performs above
+    their overall average on this surface; negative means below.
+    Returns 0.0 when data is missing or the sample is too thin (< 5 matches).
+
+    Scaling: a 10 percentage-point surface win-rate premium translates to
+    roughly +0.02 in serve-point probability.
+    """
+    if not surface_data:
+        return 0.0
+
+    # Normalise to {surface_name_lower: entry_dict}
+    surface_map: dict[str, dict] = {}
+    if isinstance(surface_data, list):
+        for entry in surface_data:
+            if isinstance(entry, dict):
+                s = str(entry.get("surface") or "").lower()
+                if s:
+                    surface_map[s] = entry
+    elif isinstance(surface_data, dict):
+        surface_map = {k.lower(): v for k, v in surface_data.items()}
+
+    def _i(d: dict, key: str) -> int:
+        try:
+            return int(d.get(key) or 0)
+        except (ValueError, TypeError):
+            return 0
+
+    entry = surface_map.get(surface.lower())
+    if not entry:
+        return 0.0
+
+    wins   = _i(entry, "wins")
+    losses = _i(entry, "losses")
+    n      = wins + losses
+    if n < 5:
+        return 0.0
+    surface_win_rate = wins / n
+
+    # Overall win rate across all surfaces
+    all_wins = all_losses = 0
+    for e in surface_map.values():
+        all_wins   += _i(e, "wins")
+        all_losses += _i(e, "losses")
+    all_n = all_wins + all_losses
+    if all_n < 10:
+        return 0.0
+    overall_win_rate = all_wins / all_n
+
+    delta = surface_win_rate - overall_win_rate
+    return max(-0.06, min(0.06, delta * 0.20))
+
+
 def _h2h_serve_stats(h2h_player_entry: dict, n_h2h: int) -> dict:
     """
     Extract serve/return fractions from one side of an H2H stats response.
@@ -574,8 +695,13 @@ def _build_player_stats(
     ranking: Optional[int],
     serve_data: dict,
     data_fetched: bool = True,
+    surface_adj: float = 0.0,
 ) -> PlayerStats:
-    """Assemble a PlayerStats from a ranking + serve/return stat dict."""
+    """Assemble a PlayerStats from a ranking + serve/return stat dict.
+
+    surface_adj is an additive adjustment derived from the player's
+    surface-specific win rate vs their overall win rate.
+    """
     skill_adj  = _ranking_to_skill_adj(ranking) if ranking else 0.0
     return_adj = _ATP_AVG_RETURN_WON - serve_data["return_won"]
     return PlayerStats(
@@ -584,7 +710,7 @@ def _build_player_stats(
         first_serve_won=max(0.50, min(0.90, serve_data["first_serve_won"])),
         second_serve_won=max(0.35, min(0.70, serve_data["second_serve_won"])),
         return_adj=max(-0.15, min(0.10, return_adj)),
-        skill_adj=max(-0.12, min(0.12, skill_adj)),
+        skill_adj=max(-0.12, min(0.12, skill_adj + surface_adj)),
         data_fetched=data_fetched,
     )
 
@@ -738,19 +864,24 @@ def predict_match_by_name(
 
     With a RapidAPI key
     ─────────────────
-    1. Fetches the live ATP rankings list (cached for the session) to resolve
-       player names → IDs and get current ATP rankings.
-    2. Calls the H2H stats endpoint to get serve/return point counts from all
-       previous matches between the two players.
-    3. When the H2H sample is thin (< MIN_H2H_MATCHES), blends proportionally
-       with Sackmann 2024 serve averages so the numbers stay stable.
-    4. skill_adj is always derived from the live ATP ranking (never from H2H).
+    1. Fetches the live ATP rankings list (cached) to resolve names → IDs
+       and get current ATP rankings.
+    2. Fetches per-player overall match stats (/player/match-stats/{id}) as
+       the primary serve/return stat source — much larger sample than H2H.
+    3. Fetches per-player surface summary (/player/surface-summary/{id}) to
+       compute a surface-specific skill adjustment for this match's surface.
+    4. Falls back to H2H stats (/h2h/stats/{id_a}/{id_b}/) when per-player
+       match stats are unavailable, blending with Sackmann 2024 for thin samples.
+    5. skill_adj is always derived from the live ATP ranking (never from H2H).
 
     Without a key (fallback)
     ─────────────────────────
     Uses Jeff Sackmann's tennis_atp dataset (data through Dec 2024).
     """
     resolved_key = api_key or _get_api_key()
+
+    # These are set in both branches so stats_summary can reference them.
+    serve_source_a = serve_source_b = "Sackmann 2024"
 
     if resolved_key:
         rankings = _get_rankings(resolved_key)
@@ -767,31 +898,67 @@ def predict_match_by_name(
         rank_a = entry_a["position"]     if entry_a else None
         rank_b = entry_b["position"]     if entry_b else None
 
-        # ---- Serve stats via H2H ----
-        n_h2h   = 0
-        serve_a = None
-        serve_b = None
+        # ── Per-player overall match stats (primary serve stats source) ─────
+        api_stats_a: Optional[dict] = None
+        api_stats_b: Optional[dict] = None
+        if id_a:
+            raw = _get_player_match_stats(str(id_a), resolved_key)
+            api_stats_a = _parse_player_serve_stats(raw) if raw else None
+        if id_b:
+            raw = _get_player_match_stats(str(id_b), resolved_key)
+            api_stats_b = _parse_player_serve_stats(raw) if raw else None
 
-        if id_a and id_b:
+        # ── Surface-specific skill adjustments ──────────────────────────────
+        surf_adj_a = surf_adj_b = 0.0
+        if id_a:
+            surf_data_a = _get_player_surface_summary(str(id_a), resolved_key)
+            surf_adj_a  = _surface_skill_adj(surf_data_a, config.surface)
+        if id_b:
+            surf_data_b = _get_player_surface_summary(str(id_b), resolved_key)
+            surf_adj_b  = _surface_skill_adj(surf_data_b, config.surface)
+
+        # ── H2H stats — fallback when per-player stats are missing ──────────
+        n_h2h   = 0
+        h2h_a   = None
+        h2h_b   = None
+        if id_a and id_b and (api_stats_a is None or api_stats_b is None):
             h2h_data = _api_get(f"/tennis/v2/atp/h2h/stats/{id_a}/{id_b}/", resolved_key)
             if h2h_data:
                 h2h = h2h_data.get("data", {})
                 n_h2h = int(h2h.get("matchesCount") or 0)
                 if n_h2h > 0:
-                    serve_a = _h2h_serve_stats(h2h.get("player1Stats", {}), n_h2h)
-                    serve_b = _h2h_serve_stats(h2h.get("player2Stats", {}), n_h2h)
+                    h2h_a = _h2h_serve_stats(h2h.get("player1Stats", {}), n_h2h)
+                    h2h_b = _h2h_serve_stats(h2h.get("player2Stats", {}), n_h2h)
 
-        # Blend H2H with Sackmann 2024 when sample is thin.
-        # Weight ramps from 0 (no H2H) to 1 (≥ MIN_H2H_MATCHES).
-        h2h_weight = min(1.0, n_h2h / MIN_H2H_MATCHES)
-
+        # ── Sackmann 2024 baseline ───────────────────────────────────────────
         sk_a = _sackmann_serve_stats(player_a_name)
         sk_b = _sackmann_serve_stats(player_b_name)
 
-        final_a = _blend(serve_a, sk_a, h2h_weight) if serve_a else sk_a
-        final_b = _blend(serve_b, sk_b, h2h_weight) if serve_b else sk_b
+        # ── Select best available serve stats per player ─────────────────────
+        # Priority: player/match-stats > H2H blend > Sackmann
+        h2h_weight = min(1.0, n_h2h / MIN_H2H_MATCHES)
 
-        # Ranking fallback: use Sackmann's last known ranking if not in live list.
+        if api_stats_a is not None:
+            final_a = api_stats_a
+            serve_source_a = "match-stats (live)"
+        elif h2h_a is not None:
+            final_a = _blend(h2h_a, sk_a, h2h_weight)
+            serve_source_a = f"H2H ({n_h2h} matches) + Sackmann blend"
+        else:
+            final_a = sk_a
+            serve_source_a = "Sackmann 2024"
+
+        if api_stats_b is not None:
+            final_b = api_stats_b
+            serve_source_b = "match-stats (live)"
+        elif h2h_b is not None:
+            final_b = _blend(h2h_b, sk_b, h2h_weight)
+            serve_source_b = f"H2H ({n_h2h} matches) + Sackmann blend"
+        else:
+            final_b = sk_b
+            serve_source_b = "Sackmann 2024"
+
+        # ── Ranking fallback: use Sackmann if not in live list ───────────────
         if rank_a is None:
             pid = _find_player_id_sackmann(player_a_name)
             rank_a = _get_ranking_sackmann(pid) if pid else None
@@ -799,27 +966,26 @@ def predict_match_by_name(
             pid = _find_player_id_sackmann(player_b_name)
             rank_b = _get_ranking_sackmann(pid) if pid else None
 
-        player_a = _build_player_stats(player_a_name, rank_a, final_a, data_fetched=entry_a is not None)
-        player_b = _build_player_stats(player_b_name, rank_b, final_b, data_fetched=entry_b is not None)
-
-        if n_h2h >= MIN_H2H_MATCHES:
-            serve_source = f"H2H ({n_h2h} matches, live rankings)"
-        elif n_h2h > 0:
-            serve_source = f"H2H ({n_h2h} matches) + Sackmann 2024 blend, live rankings"
-        else:
-            serve_source = "Sackmann 2024 serve stats, live rankings"
+        player_a = _build_player_stats(
+            player_a_name, rank_a, final_a,
+            data_fetched=entry_a is not None, surface_adj=surf_adj_a,
+        )
+        player_b = _build_player_stats(
+            player_b_name, rank_b, final_b,
+            data_fetched=entry_b is not None, surface_adj=surf_adj_b,
+        )
 
         print(f"  [RapidAPI] {player_a_name}: rank={rank_a or '?'}  "
               f"fs_in={player_a.first_serve_in:.3f}  fs_won={player_a.first_serve_won:.3f}  "
-              f"ss_won={player_a.second_serve_won:.3f}  skill={player_a.skill_adj:+.4f}")
+              f"ss_won={player_a.second_serve_won:.3f}  skill={player_a.skill_adj:+.4f}  "
+              f"surfAdj={surf_adj_a:+.4f}  src={serve_source_a}")
         print(f"  [RapidAPI] {player_b_name}: rank={rank_b or '?'}  "
               f"fs_in={player_b.first_serve_in:.3f}  fs_won={player_b.first_serve_won:.3f}  "
-              f"ss_won={player_b.second_serve_won:.3f}  skill={player_b.skill_adj:+.4f}")
+              f"ss_won={player_b.second_serve_won:.3f}  skill={player_b.skill_adj:+.4f}  "
+              f"surfAdj={surf_adj_b:+.4f}  src={serve_source_b}")
 
     else:
-        # ---- Pure Sackmann 2024 fallback ----
-        serve_source = "Sackmann 2024"
-
+        # ── Pure Sackmann 2024 fallback ──────────────────────────────────────
         sk_a = _sackmann_serve_stats(player_a_name)
         sk_b = _sackmann_serve_stats(player_b_name)
 
@@ -834,7 +1000,7 @@ def predict_match_by_name(
         print(f"  [Sackmann-2024] {player_a_name}: rank={rank_a or '?'}  skill={player_a.skill_adj:+.4f}")
         print(f"  [Sackmann-2024] {player_b_name}: rank={rank_b or '?'}  skill={player_b.skill_adj:+.4f}")
 
-    # ---- Run simulation ----
+    # ── Run simulation ───────────────────────────────────────────────────────
     result = run_simulation(player_a, player_b, config, n_simulations)
 
     if not resolved_key:
@@ -843,13 +1009,13 @@ def predict_match_by_name(
             "Add your key in the sidebar to get live 2025/2026 stats."
         )
 
-    for p in (player_a, player_b):
+    for p, src in ((player_a, serve_source_a), (player_b, serve_source_b)):
         if not p.data_fetched:
             result.warnings.append(
                 f"'{p.name}' not found in live rankings — serve stats may be stale."
             )
         result.stats_summary.append(
-            f"**{p.name}** — source: *{serve_source}*  \n"
+            f"**{p.name}** — source: *{src}*  \n"
             f"1stIn={p.first_serve_in:.3f}  1stWon={p.first_serve_won:.3f}  "
             f"2ndWon={p.second_serve_won:.3f}  retAdj={p.return_adj:+.3f}  "
             f"skillAdj={p.skill_adj:+.4f}"
