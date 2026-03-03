@@ -8,6 +8,7 @@ from tennis_predictor import (
     predict_match_by_name,
     _find_in_rankings,
     _get_rankings,
+    debug_raw_rankings,
 )
 
 st.set_page_config(page_title="Tennis Match Predictor", layout="centered")
@@ -36,10 +37,12 @@ def _load_players(key: str) -> list[str]:
 players = _load_players(api_key or "")
 
 if api_key:
-    with st.expander(f"API debug — {len(players)} players loaded", expanded=False):
-        st.caption("First 20 names returned by the API:")
+    with st.expander(f"API debug — {len(players)} players in dropdown", expanded=False):
+        if st.button("Inspect raw API response"):
+            st.json(debug_raw_rankings(api_key))
+        st.caption("First 20 names in dropdown (may be Sackmann if API parse failed):")
         st.write(players[:20])
-        search_term = st.text_input("Search for a player name in API list", key="debug_search")
+        search_term = st.text_input("Search dropdown list", key="debug_search")
         if search_term:
             matches = [p for p in players if search_term.lower() in p.lower()]
             st.write(f"{len(matches)} match(es):", matches[:30])

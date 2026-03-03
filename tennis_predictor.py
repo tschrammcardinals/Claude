@@ -522,6 +522,27 @@ def _get_rankings(api_key: str) -> list[dict]:
     return result
 
 
+def debug_raw_rankings(api_key: str) -> dict:
+    """Return diagnostic info about the raw API rankings response."""
+    data = _api_get("/tennis/v2/atp/ranking/singles/", api_key)
+    if data is None:
+        return {"error": "API call failed (check terminal for details)"}
+    top_level_keys = list(data.keys())
+    raw_list = data.get("data", [])
+    first_entry = raw_list[0] if raw_list else None
+    names_found = [
+        e.get("player", {}).get("name", "") if isinstance(e.get("player"), dict)
+        else str(e.get("player", ""))
+        for e in raw_list[:5]
+    ]
+    return {
+        "top_level_keys": top_level_keys,
+        "data_list_length": len(raw_list),
+        "first_entry_raw": first_entry,
+        "first_5_names_parsed": names_found,
+    }
+
+
 def _find_in_rankings(name: str, rankings: list[dict]) -> Optional[dict]:
     """
     Find a player's ranking entry by name. Match strategy (in order):
