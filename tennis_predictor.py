@@ -1174,6 +1174,18 @@ def predict_match_by_name(
                 h2h_adj_elo = max(-0.09, min(0.09, (h2h_wins_a / n_h2h_elo - 0.5) * 0.18))
 
             elo_prob_a = max(0.02, min(0.98, base_elo_prob + form_adj_elo + h2h_adj_elo))
+
+            # Rank-probability cap: prevent surface-Elo overcorrection (e.g. a clay
+            # specialist whose hard-court Elo is far below their overall ranking).
+            # elo_prob_a is capped within ±10pp of the ATP-rank-derived probability.
+            if rank_a is not None and rank_b is not None:
+                _rank_elo_a = 2200.0 - 260.0 * math.log10(max(1, rank_a))
+                _rank_elo_b = 2200.0 - 260.0 * math.log10(max(1, rank_b))
+                _rank_prob = _elo_win_prob(_rank_elo_a, _rank_elo_b)
+                _RANK_CAP = 0.10
+                elo_prob_a = max(_rank_prob - _RANK_CAP,
+                                 min(_rank_prob + _RANK_CAP, elo_prob_a))
+
             print(
                 f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
                 f"({_american_odds(elo_prob_a)})  "
