@@ -1145,10 +1145,26 @@ def predict_match_by_name(
             elo_b = _surface_elo(entry_b, config.surface)
             base_elo_prob = _elo_win_prob(elo_a, elo_b)
 
-            # Form adjustment: strong bidirectional weight so hot/cold streaks
-            # can move the line significantly in either direction (cap ±20 pts)
-            form_a = sk_a.get("recent_form", 0.5)
-            form_b = sk_b.get("recent_form", 0.5)
+            # Staleness-corrected form: when TA rank and Sackmann (Dec-2024) rank
+            # differ greatly, the player's level changed → blend stale Sackmann
+            # form with a rank-trajectory signal derived from how much they moved.
+            _pid_a_s = _find_player_id_sackmann(player_a_name, tour_a)
+            _pid_b_s = _find_player_id_sackmann(player_b_name, tour_b)
+            _sack_r_a = _get_ranking_sackmann(_pid_a_s, tour_a) if _pid_a_s else None
+            _sack_r_b = _get_ranking_sackmann(_pid_b_s, tour_b) if _pid_b_s else None
+
+            def _staleness_adj_form(ta_r, sack_r, raw_form):
+                if not ta_r or not sack_r:
+                    return raw_form
+                ratio = max(ta_r, sack_r) / min(ta_r, sack_r)
+                stale = max(0.0, min(1.0, (ratio - 1.0) / 2.0))
+                # sack_r/ta_r > 1 means player improved (was ranked lower = worse) → hot
+                # sack_r/ta_r < 1 means player declined (was ranked higher = better) → cold
+                rank_form = max(0.0, min(1.0, 0.5 + math.log(sack_r / ta_r) * 0.1))
+                return (1.0 - stale) * raw_form + stale * rank_form
+
+            form_a = _staleness_adj_form(rank_a, _sack_r_a, sk_a.get("recent_form", 0.5))
+            form_b = _staleness_adj_form(rank_b, _sack_r_b, sk_b.get("recent_form", 0.5))
             form_adj_elo = max(-0.20, min(0.20, (form_a - form_b) * 0.55))
 
             # H2H adjustment: persistent head-to-head edge
@@ -1162,8 +1178,9 @@ def predict_match_by_name(
                 f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
                 f"({_american_odds(elo_prob_a)})  "
                 f"base={base_elo_prob:.3f} eloA={elo_a:.0f} eloB={elo_b:.0f}  "
-                f"formA={form_a:.2f} formB={form_b:.2f} form_adj={form_adj_elo:+.3f}  "
-                f"h2h={h2h_adj_elo:+.3f}"
+                f"formA={form_a:.2f}(sackRk={_sack_r_a}) "
+                f"formB={form_b:.2f}(sackRk={_sack_r_b}) "
+                f"form_adj={form_adj_elo:+.3f}  h2h={h2h_adj_elo:+.3f}"
             )
 
         found_a = entry_a is not None
