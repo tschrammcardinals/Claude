@@ -2,6 +2,7 @@ import streamlit as st
 
 from tennis_predictor import (
     MatchConfig,
+    _american_odds,
     get_player_names,
     predict_match_by_name,
     ta_player_lookup,
@@ -112,14 +113,42 @@ if result:
     for w in result.warnings:
         st.warning(w)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric(result.player_a, f"{result.win_prob_a * 100:.1f}%")
-    with c2:
-        st.metric(result.player_b, f"{result.win_prob_b * 100:.1f}%")
+    # ── Primary: Elo-calibrated probability (tracks sportsbook opening lines) ──
+    if result.elo_prob_a is not None:
+        st.subheader("Win Probability")
+        st.caption("Elo-calibrated — designed to match sportsbook opening lines within ~5%")
+        c1, c2 = st.columns(2)
+        with c1:
+            ml_a = _american_odds(result.elo_prob_a)
+            st.metric(result.player_a,
+                      f"{result.elo_prob_a * 100:.1f}%",
+                      delta=f"ML: {ml_a}")
+        with c2:
+            ml_b = _american_odds(result.primary_prob_b)
+            st.metric(result.player_b,
+                      f"{result.primary_prob_b * 100:.1f}%",
+                      delta=f"ML: {ml_b}")
+        st.progress(result.elo_prob_a, text=result.player_a)
 
-    st.progress(result.win_prob_a, text=result.player_a)
-    st.progress(result.win_prob_b, text=result.player_b)
+        with st.expander("Monte Carlo simulation probabilities"):
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                st.metric(result.player_a, f"{result.win_prob_a * 100:.1f}%")
+            with sc2:
+                st.metric(result.player_b, f"{result.win_prob_b * 100:.1f}%")
+            st.caption(f"{result.n_simulations:,} point-by-point simulations")
+    else:
+        # Sackmann-only fallback: no Elo data available
+        st.subheader("Win Probability")
+        st.caption("Monte Carlo simulation (Elo data unavailable)")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric(result.player_a, f"{result.win_prob_a * 100:.1f}%",
+                      delta=f"ML: {_american_odds(result.win_prob_a)}")
+        with c2:
+            st.metric(result.player_b, f"{result.win_prob_b * 100:.1f}%",
+                      delta=f"ML: {_american_odds(result.win_prob_b)}")
+        st.progress(result.win_prob_a, text=result.player_a)
 
     st.subheader("Score Distribution")
     import pandas as pd

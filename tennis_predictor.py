@@ -126,6 +126,7 @@ class SimulationResult:
     avg_games: float = 0.0
     warnings: list = field(default_factory=list)
     stats_summary: list = field(default_factory=list)
+    elo_prob_a: Optional[float] = None  # Elo-calibrated win probability (matches sportsbook lines)
 
     @property
     def win_prob_a(self) -> float:
@@ -135,14 +136,27 @@ class SimulationResult:
     def win_prob_b(self) -> float:
         return max(0.01, min(0.99, self.wins_b / self.n_simulations))
 
+    @property
+    def primary_prob_a(self) -> float:
+        """Best win probability for player A — Elo-based when available, else simulation."""
+        return self.elo_prob_a if self.elo_prob_a is not None else self.win_prob_a
+
+    @property
+    def primary_prob_b(self) -> float:
+        return 1.0 - self.primary_prob_a
+
     def summary(self) -> str:
+        prob_a = self.primary_prob_a
+        prob_b = self.primary_prob_b
+        label = "Elo-calibrated" if self.elo_prob_a is not None else "Monte Carlo"
         lines = [
             f"\n{'='*52}",
             f"  {self.player_a}  vs  {self.player_b}",
             f"  Surface: {self.surface.upper()}   |   Simulations: {self.n_simulations:,}",
             f"{'='*52}",
-            f"  {self.player_a:<28} {self.win_prob_a*100:5.1f}%",
-            f"  {self.player_b:<28} {self.win_prob_b*100:5.1f}%",
+            f"  Win probability ({label}):",
+            f"  {self.player_a:<28} {prob_a*100:5.1f}%   {_american_odds(prob_a)}",
+            f"  {self.player_b:<28} {prob_b*100:5.1f}%   {_american_odds(prob_b)}",
             f"",
             f"  Average match length: {self.avg_games:.1f} games",
             f"",
@@ -638,6 +652,32 @@ def _ta_surface_adj(entry: dict, surface: str) -> float:
     return max(-0.025, min(0.025, (surface_elo - overall) * _SKILL_ADJ_PER_ELO))
 
 
+def _surface_elo(entry: dict, surface: str) -> float:
+    """Return surface-specific Elo rating from a Tennis Abstract entry."""
+    key = {
+        "hard":   "h_elo",
+        "clay":   "c_elo",
+        "grass":  "g_elo",
+        "carpet": "h_elo",
+    }.get(surface, "elo")
+    val = entry.get(key)
+    return float(val) if val else float(entry.get("elo", 1500))
+
+
+def _elo_win_prob(elo_a: float, elo_b: float) -> float:
+    """Standard Elo win probability formula (scale=400, as used by Tennis Abstract)."""
+    return 1.0 / (1.0 + 10.0 ** ((elo_b - elo_a) / 400.0))
+
+
+def _american_odds(prob: float) -> str:
+    """Convert a win probability to American moneyline odds string."""
+    prob = max(0.001, min(0.999, prob))
+    if prob >= 0.5:
+        return f"{int(-prob / (1 - prob) * 100)}"
+    else:
+        return f"+{int((1 - prob) / prob * 100)}"
+
+
 # ---------------------------------------------------------------------------
 # Player stat assembly
 # ---------------------------------------------------------------------------
@@ -817,7 +857,7 @@ def _sackmann_serve_stats(name: str, tour: str = "atp", surface: Optional[str] =
             "_n_matches":         0,
         }
         base        = _SACKMANN_WTA_BASE
-        match_files = ["wta_matches_2024.csv", "wta_matches_2023.csv", "wta_matches_2022.csv"]
+        match_files = ["wta_matches_2026.csv", "wta_matches_2025.csv", "wta_matches_2024.csv", "wta_matches_2023.csv"]
     else:
         avg = {
             "first_serve_in":     _ATP_AVG_FIRST_SERVE_IN,
@@ -835,7 +875,7 @@ def _sackmann_serve_stats(name: str, tour: str = "atp", surface: Optional[str] =
             "_n_matches":         0,
         }
         base        = _SACKMANN_ATP_BASE
-        match_files = ["atp_matches_2024.csv", "atp_matches_2023.csv", "atp_matches_2022.csv"]
+        match_files = ["atp_matches_2026.csv", "atp_matches_2025.csv", "atp_matches_2024.csv", "atp_matches_2023.csv"]
 
     player_id = _find_player_id_sackmann(name, tour)
     if not player_id:
@@ -1044,6 +1084,7 @@ def predict_match_by_name(
     Skips Tennis Abstract; uses Sackmann rankings + serve stats.
     """
     serve_source_a = serve_source_b = "Sackmann 2024"
+    elo_prob_a: Optional[float] = None
 
     if not use_sackmann:
         ta_atp = _get_ta_atp()
@@ -1082,8 +1123,10 @@ def predict_match_by_name(
         # H2H adjustment (same-tour matches only)
         h2h_adj_a = h2h_adj_b = 0.0
         h2h_str = "n/a"
+        h2h_wins_a = h2h_wins_b = 0
         if tour_a == tour_b:
             wins_a, wins_b = _sackmann_h2h(player_a_name, player_b_name, tour_a)
+            h2h_wins_a, h2h_wins_b = wins_a, wins_b
             n_h2h = wins_a + wins_b
             if n_h2h >= 3:
                 h2h_rate_a = wins_a / n_h2h
@@ -1093,6 +1136,32 @@ def predict_match_by_name(
                 h2h_str = f"{wins_a}-{wins_b}"
             elif n_h2h > 0:
                 h2h_str = f"{wins_a}-{wins_b} (too few)"
+
+        # ── Elo-calibrated win probability (primary output, tracks sportsbook lines) ──
+        elo_prob_a = None
+        if entry_a and entry_b:
+            elo_a = _surface_elo(entry_a, config.surface)
+            elo_b = _surface_elo(entry_b, config.surface)
+            base_elo_prob = _elo_win_prob(elo_a, elo_b)
+
+            # Form adjustment: hot/cold streaks not yet fully captured by Elo
+            form_a = sk_a.get("recent_form", 0.5)
+            form_b = sk_b.get("recent_form", 0.5)
+            form_adj_elo = max(-0.04, min(0.04, (form_a - form_b) * 0.06))
+
+            # H2H adjustment: persistent psychological edge
+            n_h2h_elo = h2h_wins_a + h2h_wins_b
+            h2h_adj_elo = 0.0
+            if n_h2h_elo >= 3:
+                h2h_adj_elo = max(-0.04, min(0.04, (h2h_wins_a / n_h2h_elo - 0.5) * 0.10))
+
+            elo_prob_a = max(0.02, min(0.98, base_elo_prob + form_adj_elo + h2h_adj_elo))
+            print(
+                f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
+                f"({_american_odds(elo_prob_a)})  "
+                f"base={base_elo_prob:.3f} eloA={elo_a:.0f} eloB={elo_b:.0f}  "
+                f"form={form_adj_elo:+.3f} h2h={h2h_adj_elo:+.3f}"
+            )
 
         found_a = entry_a is not None
         found_b = entry_b is not None
@@ -1172,6 +1241,7 @@ def predict_match_by_name(
 
     # ── Run simulation ────────────────────────────────────────────────────────
     result = run_simulation(player_a, player_b, config, n_simulations)
+    result.elo_prob_a = elo_prob_a
 
     for p, src in ((player_a, serve_source_a), (player_b, serve_source_b)):
         if not p.data_fetched:
