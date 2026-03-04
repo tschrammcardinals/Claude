@@ -439,6 +439,12 @@ _ELO_SCALE = 268.0
 _ELO_REF_RANK = 150
 _SKILL_ADJ_PER_ELO = 0.000251
 
+# Elo probability sharpening — Tennis's point→game→set→match structure amplifies
+# skill gaps more than raw Elo suggests (equivalent to using Elo scale ~250 vs 400).
+# Calibrated so that an 80-Elo-point gap (typical rank-50 vs rank-100 matchup)
+# maps to ~67% rather than ~61%, matching sportsbook opening line calibration.
+_ELO_PROB_SHARPENING = 1.6
+
 _STAT_LOOKBACK     = 20   # max matches for serve-stat window
 _SACKMANN_MIN_MATCHES = 10
 _FORM_LOOKBACK     = 15   # matches for recent-form window
@@ -667,6 +673,19 @@ def _surface_elo(entry: dict, surface: str) -> float:
 def _elo_win_prob(elo_a: float, elo_b: float) -> float:
     """Standard Elo win probability formula (scale=400, as used by Tennis Abstract)."""
     return 1.0 / (1.0 + 10.0 ** ((elo_b - elo_a) / 400.0))
+
+
+def _sharpen_elo_prob(p: float, k: float = _ELO_PROB_SHARPENING) -> float:
+    """
+    Sharpen an Elo win probability to better match sportsbook opening lines.
+
+    Applies a logit-power transformation: expit(k * logit(p)).
+    k=1.6 is equivalent to using Elo scale 250 instead of 400, accounting for
+    how tennis scoring (points→games→sets) amplifies skill differences.
+    """
+    p = max(0.001, min(0.999, p))
+    logit_p = math.log(p / (1.0 - p))
+    return 1.0 / (1.0 + math.exp(-k * logit_p))
 
 
 def _american_odds(prob: float) -> str:
@@ -1142,24 +1161,27 @@ def predict_match_by_name(
         if entry_a and entry_b:
             elo_a = _surface_elo(entry_a, config.surface)
             elo_b = _surface_elo(entry_b, config.surface)
-            base_elo_prob = _elo_win_prob(elo_a, elo_b)
+            # Sharpen raw Elo probability: tennis scoring amplifies skill gaps
+            # (equivalent to using Elo scale ~250 instead of 400).
+            base_elo_prob = _sharpen_elo_prob(_elo_win_prob(elo_a, elo_b))
 
-            # Form adjustment: hot/cold streaks not yet fully captured by Elo
+            # Form adjustment: hot/cold streaks add odds-ratio weight on top of Elo
             form_a = sk_a.get("recent_form", 0.5)
             form_b = sk_b.get("recent_form", 0.5)
-            form_adj_elo = max(-0.07, min(0.07, (form_a - form_b) * 0.15))
+            form_adj_elo = max(-0.09, min(0.09, (form_a - form_b) * 0.20))
 
             # H2H adjustment: persistent psychological edge
             n_h2h_elo = h2h_wins_a + h2h_wins_b
             h2h_adj_elo = 0.0
             if n_h2h_elo >= 2:
-                h2h_adj_elo = max(-0.05, min(0.05, (h2h_wins_a / n_h2h_elo - 0.5) * 0.12))
+                h2h_adj_elo = max(-0.07, min(0.07, (h2h_wins_a / n_h2h_elo - 0.5) * 0.15))
 
             elo_prob_a = max(0.02, min(0.98, base_elo_prob + form_adj_elo + h2h_adj_elo))
             print(
                 f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
                 f"({_american_odds(elo_prob_a)})  "
-                f"base={base_elo_prob:.3f} eloA={elo_a:.0f} eloB={elo_b:.0f}  "
+                f"base_raw={_elo_win_prob(elo_a, elo_b):.3f} base_sharp={base_elo_prob:.3f}  "
+                f"eloA={elo_a:.0f} eloB={elo_b:.0f}  "
                 f"form={form_adj_elo:+.3f} h2h={h2h_adj_elo:+.3f}"
             )
 
@@ -1173,19 +1195,20 @@ def predict_match_by_name(
                 return 2200.0 - 260.0 * math.log10(max(1, r))
             elo_a_synth = _rank_to_elo(rank_a)
             elo_b_synth = _rank_to_elo(rank_b)
-            base_prob = _elo_win_prob(elo_a_synth, elo_b_synth)
+            base_prob = _sharpen_elo_prob(_elo_win_prob(elo_a_synth, elo_b_synth))
             form_a_fb = sk_a.get("recent_form", 0.5)
             form_b_fb = sk_b.get("recent_form", 0.5)
-            form_adj_fb = max(-0.07, min(0.07, (form_a_fb - form_b_fb) * 0.15))
+            form_adj_fb = max(-0.09, min(0.09, (form_a_fb - form_b_fb) * 0.20))
             n_h2h_fb = h2h_wins_a + h2h_wins_b
             h2h_adj_fb = 0.0
             if n_h2h_fb >= 2:
-                h2h_adj_fb = max(-0.05, min(0.05, (h2h_wins_a / n_h2h_fb - 0.5) * 0.12))
+                h2h_adj_fb = max(-0.07, min(0.07, (h2h_wins_a / n_h2h_fb - 0.5) * 0.15))
             elo_prob_a = max(0.02, min(0.98, base_prob + form_adj_fb + h2h_adj_fb))
             print(
                 f"  [RankElo] {player_a_name} win prob: {elo_prob_a:.3f}  "
                 f"({_american_odds(elo_prob_a)})  rankA={rank_a} rankB={rank_b}  "
-                f"eloA={elo_a_synth:.0f} eloB={elo_b_synth:.0f}  form={form_adj_fb:+.3f}"
+                f"eloA={elo_a_synth:.0f} eloB={elo_b_synth:.0f}  "
+                f"base_sharp={base_prob:.3f}  form={form_adj_fb:+.3f}"
             )
 
         player_a = _build_player_stats(
