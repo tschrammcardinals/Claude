@@ -427,8 +427,8 @@ _ATP_AVG_ELO        = 1550.0     # approximate ATP tour-average TA Elo
 _WTA_AVG_ELO        = 1500.0     # approximate WTA tour-average TA Elo
 
 # Recent-form adjustment (applied to elo_prob_a)
-_FORM_WEIGHT  = 0.30   # fraction of net form advantage applied as prob shift
-_FORM_MAX_ADJ = 0.04   # hard cap: ±4 percentage points
+_FORM_WEIGHT  = 0.50   # fraction of net opponent-quality-adjusted form applied as prob shift
+_FORM_MAX_ADJ = 0.10   # hard cap: ±10 percentage points
 _FORM_MATCHES = 10     # how many recent matches to consider
 
 
@@ -722,27 +722,47 @@ def _build_player_stats(
 # Recent-form score
 # ---------------------------------------------------------------------------
 
-def _recent_form_score(matches: list[dict], surface: str) -> float:
+def _recent_form_score(matches: list[dict], surface: str, player_rank: Optional[int] = None) -> float:
     """
-    Return a form score in [-0.5, +0.5] representing how much a player's
-    recent win rate exceeds the 0.5 neutral baseline.
+    Opponent-quality-adjusted form score.
 
-    Surface-matching matches are weighted 2× vs other surfaces so that
-    on-surface form counts more for the upcoming match.
+    For each match, computes (actual_result − expected_win_prob_vs_opponent)
+    using a rank-derived pseudo-Elo for the opponent:
+      • Win against a stronger opponent  →  large positive contribution
+      • Loss to a weaker opponent        →  large negative contribution
+      • Results matching expectation     →  near-zero contribution
+
+    Surface-matching matches are weighted 2× vs other surfaces.
     Returns 0.0 when no matches are available.
     """
     if not matches:
         return 0.0
-    weighted_wins = 0.0
-    weighted_total = 0.0
+
+    weighted_scores = 0.0
+    weighted_total  = 0.0
+
     for m in matches[:_FORM_MATCHES]:
-        w = 2.0 if m.get("surface") == surface else 1.0
-        weighted_total += w
-        if m.get("result") == "W":
-            weighted_wins += w
+        surf_weight = 2.0 if m.get("surface") == surface else 1.0
+
+        try:
+            opp_rank = int(m.get("opp_rank", ""))
+        except (ValueError, TypeError):
+            opp_rank = None
+
+        if opp_rank is not None and player_rank is not None:
+            p_elo    = 2200.0 - 375.0 * math.log10(max(1, player_rank))
+            o_elo    = 2200.0 - 375.0 * math.log10(max(1, opp_rank))
+            expected = _elo_win_prob(p_elo, o_elo)
+        else:
+            expected = 0.5   # fallback when rank unavailable
+
+        actual  = 1.0 if m.get("result") == "W" else 0.0
+        weighted_scores += surf_weight * (actual - expected)
+        weighted_total  += surf_weight
+
     if weighted_total == 0.0:
         return 0.0
-    return (weighted_wins / weighted_total) - 0.5   # positive = in form
+    return weighted_scores / weighted_total   # positive = outperforming expectations
 
 
 # ---------------------------------------------------------------------------
@@ -808,10 +828,10 @@ def predict_match_by_name(
     recent_b: list[dict] = []
     if entry_a and entry_a.get("player_id"):
         recent_a = _fetch_recent_matches(entry_a["player_id"], n=_FORM_MATCHES)
-        form_score_a = _recent_form_score(recent_a, config.surface)
+        form_score_a = _recent_form_score(recent_a, config.surface, player_rank=rank_a)
     if entry_b and entry_b.get("player_id"):
         recent_b = _fetch_recent_matches(entry_b["player_id"], n=_FORM_MATCHES)
-        form_score_b = _recent_form_score(recent_b, config.surface)
+        form_score_b = _recent_form_score(recent_b, config.surface, player_rank=rank_b)
 
     if elo_prob_a is not None and (recent_a or recent_b):
         net_form = form_score_a - form_score_b   # positive = A in better form
