@@ -448,6 +448,8 @@ _NAME_ALIASES: dict[str, str] = {
     "maroszan":             "Fabian Marozsan",
     "z. svadja":            "Zachary Svajda",
     "svadja":               "Zachary Svajda",
+    "felix auger-aliassime": "Felix Auger Aliassime",
+    "m. zheng":             "Michael Zheng",
 }
 
 
