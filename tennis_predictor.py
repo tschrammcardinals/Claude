@@ -173,10 +173,9 @@ class SimulationResult:
 # Core probability engine
 # ---------------------------------------------------------------------------
 
-def base_serve_win_prob(server: PlayerStats, returner: PlayerStats, surface: str) -> float:
-    mult = SURFACE_SERVE_MULTIPLIER[surface]
+def base_serve_win_prob(server: PlayerStats, returner: PlayerStats) -> float:
     raw = server.first_serve_in * server.first_serve_won + (1 - server.first_serve_in) * server.second_serve_won
-    adjusted = raw * mult + returner.return_adj + server.skill_adj
+    adjusted = raw + returner.return_adj + server.skill_adj
     return max(0.05, min(0.95, adjusted))
 
 
@@ -188,7 +187,7 @@ def point_win_prob(
     is_tiebreak: bool = False,
     is_pressure: bool = False,
 ) -> float:
-    p = base_serve_win_prob(server, returner, config.surface)
+    p = base_serve_win_prob(server, returner)
 
     if is_tiebreak:
         p += server.tiebreak_bonus
@@ -317,7 +316,7 @@ def _simulate_set(
         if games_b >= 6 and games_b - games_a >= 2:
             return games_a, games_b, total_points
         if at_six_all and (not is_final_set or config.final_set_tiebreak):
-            pass
+            return games_a, games_b, total_points
 
 
 def simulate_match(
