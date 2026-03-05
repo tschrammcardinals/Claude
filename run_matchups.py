@@ -62,20 +62,22 @@ for p1, p2 in MATCHUPS:
             "Player": r.player_a,
             "Win Probability": f"{prob_a*100:.1f}%",
             "Opponent": r.player_b,
+            "Opponent Win Probability": f"{prob_b*100:.1f}%",
         })
         rows.append({
             "Player": r.player_b,
             "Win Probability": f"{prob_b*100:.1f}%",
             "Opponent": r.player_a,
+            "Opponent Win Probability": f"{prob_a*100:.1f}%",
         })
         print(f"OK  {r.player_a} {prob_a*100:.1f}% vs {r.player_b} {prob_b*100:.1f}%")
     except Exception as e:
         print(f"ERR {p1} vs {p2}: {e}", file=sys.stderr)
-        rows.append({"Player": p1, "Win Probability": "ERROR", "Opponent": p2})
-        rows.append({"Player": p2, "Win Probability": "ERROR", "Opponent": p1})
+        rows.append({"Player": p1, "Win Probability": "ERROR", "Opponent": p2, "Opponent Win Probability": "ERROR"})
+        rows.append({"Player": p2, "Win Probability": "ERROR", "Opponent": p1, "Opponent Win Probability": "ERROR"})
 
 with open("matchup_results.csv", "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=["Player", "Win Probability", "Opponent"])
+    writer = csv.DictWriter(f, fieldnames=["Player", "Win Probability", "Opponent", "Opponent Win Probability"])
     writer.writeheader()
     writer.writerows(rows)
 
