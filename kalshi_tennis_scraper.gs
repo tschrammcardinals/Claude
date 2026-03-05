@@ -48,6 +48,15 @@ const MAX_PAGES = 20;
 /** Markets per page */
 const PAGE_LIMIT = 200;
 
+/** Script Property key for storing seen market tickers (JSON array) */
+const PROP_SEEN_TICKERS = 'SEEN_MARKET_TICKERS';
+
+/** Script Property key for the notification email address */
+const PROP_NOTIFICATION_EMAIL = 'NOTIFICATION_EMAIL';
+
+/** How often the notification check trigger fires (minutes) */
+const NOTIFICATION_CHECK_INTERVAL_MINUTES = 5;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CREDENTIAL MANAGEMENT
 // ─────────────────────────────────────────────────────────────────────────────
@@ -686,6 +695,274 @@ function FETCH_TENNIS_MATCHUPS() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Stores the email address to receive new-market notifications.
+ * Call this once from the Apps Script editor, or use the menu dialog.
+ *
+ * @param {string} email - Email address for notifications
+ */
+function setNotificationEmail(email) {
+  PropertiesService.getScriptProperties().setProperty(PROP_NOTIFICATION_EMAIL, email);
+  Logger.log('Notification email saved: ' + email);
+}
+
+/**
+ * Returns the stored notification email, or the script owner's email as fallback.
+ * @returns {string}
+ */
+function getNotificationEmail_() {
+  const stored = PropertiesService.getScriptProperties().getProperty(PROP_NOTIFICATION_EMAIL);
+  return stored || Session.getActiveUser().getEmail();
+}
+
+/**
+ * Loads the set of market tickers that have already been notified about.
+ * @returns {Set<string>}
+ */
+function loadSeenTickers_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(PROP_SEEN_TICKERS);
+  if (!raw) return new Set();
+  try {
+    return new Set(JSON.parse(raw));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+/**
+ * Persists the current set of seen tickers to Script Properties.
+ * Script Properties have a 500KB limit; stores up to ~10k tickers safely.
+ * @param {Set<string>} tickerSet
+ */
+function saveSeenTickers_(tickerSet) {
+  const arr = Array.from(tickerSet);
+  PropertiesService.getScriptProperties().setProperty(PROP_SEEN_TICKERS, JSON.stringify(arr));
+}
+
+/**
+ * Clears the seen-tickers store so the next check treats everything as new.
+ * Useful for testing, or when you want to be re-notified after a reset.
+ */
+function clearSeenMarkets() {
+  PropertiesService.getScriptProperties().deleteProperty(PROP_SEEN_TICKERS);
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    'Seen-markets history cleared. Next check will notify for all current markets.',
+    'Kalshi Tennis Notifications', 5
+  );
+  Logger.log('Seen-markets history cleared.');
+}
+
+/**
+ * Builds and sends an email summarising newly-detected tennis markets.
+ *
+ * @param {Array.<Array>} newRows  - Rows with [series, event, p1, p2, ticker, url]
+ * @param {string}        toEmail  - Recipient address
+ */
+function sendNewMarketsEmail_(newRows, toEmail) {
+  const count = newRows.length;
+  const subject = '[Kalshi Tennis] ' + count + ' new line' + (count === 1 ? '' : 's') + ' just dropped!';
+
+  // Group rows by series for a cleaner email body
+  const byTournament = {};
+  for (const row of newRows) {
+    const key = row[0] + ' — ' + row[1]; // series + event
+    if (!byTournament[key]) byTournament[key] = [];
+    byTournament[key].push(row);
+  }
+
+  // Plain-text body
+  let textBody = 'New ATP/WTA tennis lines are now live on Kalshi!\n\n';
+  for (const tournament of Object.keys(byTournament).sort()) {
+    textBody += '=== ' + tournament + ' ===\n';
+    for (const row of byTournament[tournament]) {
+      textBody += '  ' + row[2] + ' vs. ' + row[3] + '\n';
+      textBody += '  ' + row[5] + '\n\n';
+    }
+  }
+  textBody += '──────────────────────────────────────\n';
+  textBody += 'Checked at: ' + new Date().toLocaleString() + '\n';
+  textBody += 'Powered by Kalshi Tennis Scraper (Google Sheets)\n';
+
+  // HTML body — nicer for email clients
+  let htmlBody = '<html><body style="font-family:Arial,sans-serif;color:#202124;">';
+  htmlBody += '<h2 style="color:#1a73e8;">🎾 ' + count + ' new Kalshi tennis line' + (count === 1 ? '' : 's') + ' just dropped!</h2>';
+
+  for (const tournament of Object.keys(byTournament).sort()) {
+    htmlBody += '<h3 style="margin-bottom:4px;border-bottom:1px solid #dadce0;">' + tournament + '</h3>';
+    htmlBody += '<table cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:600px;">';
+    htmlBody += '<tr style="background:#1a73e8;color:#fff;">' +
+      '<th align="left">Player 1</th><th align="left">Player 2</th><th align="left">Link</th></tr>';
+
+    for (let i = 0; i < byTournament[tournament].length; i++) {
+      const row = byTournament[tournament][i];
+      const bg = i % 2 === 0 ? '#f8f9fa' : '#ffffff';
+      htmlBody += '<tr style="background:' + bg + ';">' +
+        '<td>' + row[2] + '</td>' +
+        '<td>' + row[3] + '</td>' +
+        '<td><a href="' + row[5] + '" style="color:#1a73e8;">' + row[4] + '</a></td>' +
+        '</tr>';
+    }
+    htmlBody += '</table><br>';
+  }
+
+  htmlBody += '<p style="color:#888;font-size:12px;">Checked at ' + new Date().toLocaleString() + '</p>';
+  htmlBody += '</body></html>';
+
+  MailApp.sendEmail({
+    to:       toEmail,
+    subject:  subject,
+    body:     textBody,
+    htmlBody: htmlBody,
+  });
+
+  Logger.log('Notification email sent to ' + toEmail + ' for ' + count + ' new market(s).');
+}
+
+/**
+ * Core notification check: compares live Kalshi tennis markets against the
+ * set of previously seen tickers and emails you about anything new.
+ *
+ * This is the function to attach to a time-driven trigger.
+ */
+function checkForNewTennisMarkets() {
+  Logger.log('Notification check started at ' + new Date().toISOString());
+
+  let rows;
+  try {
+    rows = getLiveTennisMatchups();
+  } catch (e) {
+    Logger.log('checkForNewTennisMarkets: fetch failed — ' + e.message);
+    return; // Don't crash the trigger; try again next interval
+  }
+
+  if (rows.length === 0) {
+    Logger.log('No live tennis markets found.');
+    return;
+  }
+
+  const seenTickers = loadSeenTickers_();
+  const newRows = rows.filter(function(row) {
+    return !seenTickers.has(row[4]); // row[4] is the market ticker
+  });
+
+  Logger.log('Live markets: ' + rows.length + ', new: ' + newRows.length);
+
+  if (newRows.length > 0) {
+    const email = getNotificationEmail_();
+    try {
+      sendNewMarketsEmail_(newRows, email);
+    } catch (e) {
+      Logger.log('Failed to send notification email: ' + e.message);
+    }
+
+    // Mark the new tickers as seen AFTER attempting to send, so a send failure
+    // retries on the next check rather than silently swallowing the notification.
+    for (const row of newRows) {
+      seenTickers.add(row[4]);
+    }
+    saveSeenTickers_(seenTickers);
+  }
+
+  Logger.log('Notification check complete.');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION TRIGGERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Installs a time-driven trigger that runs checkForNewTennisMarkets every
+ * NOTIFICATION_CHECK_INTERVAL_MINUTES minutes.
+ * Also seeds the seen-tickers store with whatever is live right now, so you
+ * only get notified about markets that appear *after* setup.
+ */
+function installNotificationTrigger() {
+  removeNotificationTrigger(); // avoid duplicates
+
+  // Seed seen tickers with current markets so we don't spam on first run
+  try {
+    const rows = getLiveTennisMatchups();
+    if (rows.length > 0) {
+      const tickers = new Set(rows.map(function(r) { return r[4]; }));
+      saveSeenTickers_(tickers);
+      Logger.log('Seeded seen-tickers with ' + tickers.size + ' current markets.');
+    }
+  } catch (e) {
+    Logger.log('Could not seed seen-tickers (will notify for all current markets on first run): ' + e.message);
+  }
+
+  ScriptApp.newTrigger('checkForNewTennisMarkets')
+    .timeBased()
+    .everyMinutes(NOTIFICATION_CHECK_INTERVAL_MINUTES)
+    .create();
+
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    'Notifications ON: checking every ' + NOTIFICATION_CHECK_INTERVAL_MINUTES +
+    ' min. Alerts → ' + getNotificationEmail_(),
+    'Kalshi Tennis Notifications', 7
+  );
+  Logger.log('Notification trigger installed.');
+}
+
+/**
+ * Removes the notification check trigger.
+ */
+function removeNotificationTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'checkForNewTennisMarkets') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+}
+
+/**
+ * Disables notifications and shows a confirmation toast.
+ */
+function disableNotifications() {
+  removeNotificationTrigger();
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    'Notifications disabled.', 'Kalshi Tennis Notifications', 4
+  );
+  Logger.log('Notification trigger removed.');
+}
+
+/**
+ * Prompts the user for their notification email address then enables the trigger.
+ */
+function showNotificationSetupDialog() {
+  const ui = SpreadsheetApp.getUi();
+
+  const emailResponse = ui.prompt(
+    'Kalshi Tennis — Notification Setup',
+    'Enter the email address to receive new-line alerts.\n' +
+    '(Leave blank to use your Google account email: ' + Session.getActiveUser().getEmail() + ')',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (emailResponse.getSelectedButton() !== ui.Button.OK) return;
+
+  const email = emailResponse.getResponseText().trim();
+  if (email) {
+    setNotificationEmail(email);
+  }
+
+  installNotificationTrigger();
+
+  ui.alert(
+    'Notifications Enabled!',
+    'You will receive an email at ' + getNotificationEmail_() +
+    ' whenever new ATP/WTA 250+ tennis lines drop on Kalshi.\n\n' +
+    'Checks run every ' + NOTIFICATION_CHECK_INTERVAL_MINUTES + ' minutes.\n\n' +
+    'To stop notifications, use: Kalshi Tennis → Notifications → Disable Notifications.',
+    ui.ButtonSet.OK
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MENU & TRIGGERS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -700,6 +977,15 @@ function onOpen() {
     .addItem('Setup Credentials', 'showCredentialDialog')
     .addItem('Setup Auto-Refresh (every 15 min)', 'installAutoRefreshTrigger')
     .addItem('Remove Auto-Refresh', 'removeAutoRefreshTrigger')
+    .addSeparator()
+    .addSubMenu(
+      SpreadsheetApp.getUi().createMenu('Notifications')
+        .addItem('Enable New-Line Notifications…', 'showNotificationSetupDialog')
+        .addItem('Disable Notifications',          'disableNotifications')
+        .addSeparator()
+        .addItem('Check for New Lines Now',        'checkForNewTennisMarkets')
+        .addItem('Reset Seen-Markets History',     'clearSeenMarkets')
+    )
     .addToUi();
 }
 
