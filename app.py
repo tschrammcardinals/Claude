@@ -1,6 +1,6 @@
 import streamlit as st
 
-from tennis_predictor import (
+from tennis_predictor_v2 import (
     MatchConfig,
     _american_odds,
     get_player_names,
