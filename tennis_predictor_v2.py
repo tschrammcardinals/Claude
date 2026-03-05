@@ -426,6 +426,11 @@ _RETURN_ADJ_PER_ELO = 0.000150   # return-skill contribution per Elo point above
 _ATP_AVG_ELO        = 1550.0     # approximate ATP tour-average TA Elo
 _WTA_AVG_ELO        = 1500.0     # approximate WTA tour-average TA Elo
 
+# Recent-form adjustment (applied to elo_prob_a)
+_FORM_WEIGHT  = 0.30   # fraction of net form advantage applied as prob shift
+_FORM_MAX_ADJ = 0.04   # hard cap: ±4 percentage points
+_FORM_MATCHES = 10     # how many recent matches to consider
+
 
 # ---------------------------------------------------------------------------
 # Name normalisation + aliases
@@ -714,6 +719,33 @@ def _build_player_stats(
 
 
 # ---------------------------------------------------------------------------
+# Recent-form score
+# ---------------------------------------------------------------------------
+
+def _recent_form_score(matches: list[dict], surface: str) -> float:
+    """
+    Return a form score in [-0.5, +0.5] representing how much a player's
+    recent win rate exceeds the 0.5 neutral baseline.
+
+    Surface-matching matches are weighted 2× vs other surfaces so that
+    on-surface form counts more for the upcoming match.
+    Returns 0.0 when no matches are available.
+    """
+    if not matches:
+        return 0.0
+    weighted_wins = 0.0
+    weighted_total = 0.0
+    for m in matches[:_FORM_MATCHES]:
+        w = 2.0 if m.get("surface") == surface else 1.0
+        weighted_total += w
+        if m.get("result") == "W":
+            weighted_wins += w
+    if weighted_total == 0.0:
+        return 0.0
+    return (weighted_wins / weighted_total) - 0.5   # positive = in form
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -770,6 +802,31 @@ def predict_match_by_name(
             f"({_american_odds(elo_prob_a)})  rankA={rank_a} rankB={rank_b}"
         )
 
+    # ── Recent-form adjustment ────────────────────────────────────────────────
+    form_score_a = form_score_b = 0.0
+    recent_a: list[dict] = []
+    recent_b: list[dict] = []
+    if entry_a and entry_a.get("player_id"):
+        recent_a = _fetch_recent_matches(entry_a["player_id"], n=_FORM_MATCHES)
+        form_score_a = _recent_form_score(recent_a, config.surface)
+    if entry_b and entry_b.get("player_id"):
+        recent_b = _fetch_recent_matches(entry_b["player_id"], n=_FORM_MATCHES)
+        form_score_b = _recent_form_score(recent_b, config.surface)
+
+    if elo_prob_a is not None and (recent_a or recent_b):
+        net_form = form_score_a - form_score_b   # positive = A in better form
+        form_adj = max(-_FORM_MAX_ADJ, min(_FORM_MAX_ADJ, _FORM_WEIGHT * net_form))
+        elo_prob_a = max(0.02, min(0.98, elo_prob_a + form_adj))
+        wins_a = sum(1 for m in recent_a if m.get("result") == "W")
+        wins_b = sum(1 for m in recent_b if m.get("result") == "W")
+        print(
+            f"  [Form] {player_a_name}: {wins_a}/{len(recent_a)} "
+            f"score={form_score_a:+.3f}  |  "
+            f"{player_b_name}: {wins_b}/{len(recent_b)} "
+            f"score={form_score_b:+.3f}  →  adj={form_adj:+.3f}  "
+            f"final={elo_prob_a:.3f} ({_american_odds(elo_prob_a)})"
+        )
+
     # ── Build simulation stats ────────────────────────────────────────────────
     player_a = _build_player_stats(
         player_a_name, rank_a, tour_a,
@@ -801,9 +858,15 @@ def predict_match_by_name(
                 f"'{p.name}' not found in Tennis Abstract — using tour-average serve stats."
             )
         src = f"Tennis Abstract ({tour.upper()})"
+        recent = recent_a if p is player_a else recent_b
+        form_score = form_score_a if p is player_a else form_score_b
+        surf_adj = surf_adj_a if p is player_a else surf_adj_b
+        wins_r = sum(1 for m in recent if m.get("result") == "W")
+        form_str = f"{wins_r}W/{len(recent)-wins_r}L  formScore={form_score:+.3f}" if recent else "no recent data"
         result.stats_summary.append(
             f"**{p.name}** — source: *{src}*  \n"
-            f"skillAdj={p.skill_adj:+.4f}  surfAdj={surf_adj_a if p is player_a else surf_adj_b:+.4f}"
+            f"skillAdj={p.skill_adj:+.4f}  surfAdj={surf_adj:+.4f}  "
+            f"recentForm={form_str}"
         )
 
     return result
