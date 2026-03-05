@@ -6,39 +6,22 @@ Simulates tennis matches point-by-point using a Monte Carlo approach.
 Simulation hierarchy:
   Point → Game (deuce/advantage logic) → Set (tiebreak at 6-6) → Match
 
-Player statistics drive point-win probabilities, adjusted for:
-  - Court surface (clay / grass / hard / carpet) — surface-specific Sackmann stats
-  - Momentum (recent point streaks)
-  - Fatigue (later sets in long matches)
-  - Pressure situations (break points) — calibrated from actual BP saved/converted %
-  - Tiebreaks — calibrated from historical TB win rate + ace rate
-  - Recent form — last 15 matches win rate
-  - Head-to-head record — Sackmann 3-year H2H
-
-Primary data source — Tennis Abstract (tennisabstract.com):
+Data source — Tennis Abstract (tennisabstract.com):
   • atp_elo_ratings.html  → ATP player names, official rankings, surface Elo ratings
   • wta_elo_ratings.html  → WTA player names, official rankings, surface Elo ratings
-  Surface Elo (hElo / cElo / gElo) drives per-surface skill adjustments.
-  Fetched once per session and cached in memory.
+  Surface Elo (hElo / cElo / gElo) drives the primary win probability and
+  per-surface skill adjustments. Fetched once per session and cached in memory.
 
-Serve / return statistics — Jeff Sackmann's tennis_atp + tennis_wta repos:
-  Weighted average of each player's last 20 matches (2022–2024 data).
-  Surface-specific filtering when ≥ 8 matches on target surface.
-  Extended stats: ace rate, DF rate, BP saved/converted %, tiebreak win %.
-  Blended with tour averages when the sample is thin.
-
-Fallback (player not found in Tennis Abstract):
-  Jeff Sackmann's ranking CSVs for rank-based skill adjustment.
-  Tour averages for serve stats when the player has no match history.
+Player serve profiles use tour averages (ATP / WTA) as the baseline.
+Skill differentiation comes from:
+  - Ranking-based skill_adj (via Elo-scale conversion)
+  - Surface specialty adj (surface Elo vs overall Elo delta)
 
 Run `python tennis_predictor.py` for a demo.
 """
 
-import csv
-import io
 import math
 import random
-import re
 import statistics
 import unicodedata
 import urllib.request
@@ -52,14 +35,6 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 SURFACES = {"clay", "grass", "hard", "carpet"}
-
-# Surface multipliers used only when no surface-specific Sackmann data is available
-SURFACE_SERVE_MULTIPLIER = {
-    "clay":   0.94,
-    "grass":  1.07,
-    "hard":   1.00,
-    "carpet": 1.04,
-}
 
 MOMENTUM_WEIGHT = 0.03
 MOMENTUM_STREAK_THRESHOLD = 3
@@ -439,19 +414,6 @@ _ELO_REF_RANK = 150
 _SKILL_ADJ_PER_ELO = 0.000251
 
 
-_STAT_LOOKBACK     = 20   # max matches for serve-stat window
-_SACKMANN_MIN_MATCHES = 10
-_FORM_LOOKBACK     = 10   # matches for recent-form window (tighter = more sensitive to current form)
-_SURF_MIN_MATCHES  = 8    # minimum surface matches to use surface-specific data
-
-_SACKMANN_SURFACE = {
-    "hard":   "Hard",
-    "clay":   "Clay",
-    "grass":  "Grass",
-    "carpet": "Carpet",
-}
-
-
 # ---------------------------------------------------------------------------
 # Name normalisation + aliases
 # ---------------------------------------------------------------------------
@@ -685,374 +647,31 @@ def _american_odds(prob: float) -> str:
 def _build_player_stats(
     name: str,
     ranking: Optional[int],
-    serve_data: dict,
+    tour: str = "atp",
     data_fetched: bool = True,
     surface_adj: float = 0.0,
-    h2h_adj: float = 0.0,
 ) -> PlayerStats:
-    tour = serve_data.get("_tour", "atp")
-    avg_bp_saved = _ATP_AVG_BP_SAVED if tour == "atp" else _WTA_AVG_BP_SAVED
-    avg_bp_conv  = _ATP_AVG_BP_CONV  if tour == "atp" else _WTA_AVG_BP_CONV
-    avg_ace      = _ATP_AVG_ACE_RATE if tour == "atp" else _WTA_AVG_ACE_RATE
-    avg_df       = _ATP_AVG_DF_RATE  if tour == "atp" else _WTA_AVG_DF_RATE
+    if tour == "wta":
+        fs_in  = _WTA_AVG_FIRST_SERVE_IN
+        fs_won = _WTA_AVG_FIRST_SERVE_WON
+        ss_won = _WTA_AVG_SECOND_SERVE_WON
+    else:
+        fs_in  = _ATP_AVG_FIRST_SERVE_IN
+        fs_won = _ATP_AVG_FIRST_SERVE_WON
+        ss_won = _ATP_AVG_SECOND_SERVE_WON
 
-    avg_return  = serve_data.get("_avg_return_won", _ATP_AVG_RETURN_WON)
-    return_adj  = avg_return - serve_data["return_won"]
     skill_adj   = _ranking_to_skill_adj(ranking) if ranking else 0.0
-
-    bp_saved_pct     = serve_data.get("bp_saved_pct", avg_bp_saved)
-    bp_converted_pct = serve_data.get("bp_converted_pct", avg_bp_conv)
-    tb_win_pct       = serve_data.get("tb_win_pct", 0.5)
-    ace_rate         = serve_data.get("ace_rate", avg_ace)
-    df_rate          = serve_data.get("df_rate", avg_df)
-    recent_form      = serve_data.get("recent_form", 0.5)
-
-    # Pressure adjustment: calibrated from actual BP save/convert rates
-    pressure_adj     = max(-0.02, min(0.02, (bp_saved_pct - avg_bp_saved) * 0.12))
-    pressure_ret_adj = max(-0.02, min(0.02, (bp_converted_pct - avg_bp_conv) * 0.12))
-
-    # Tiebreak bonus: TB win rate above 50% + ace rate premium
-    tb_bonus = max(-0.04, min(0.04,
-        (tb_win_pct - 0.5) * 0.08 + (ace_rate - avg_ace) * 0.25))
-
-    # Form adjustment: recent win rate vs expected ~55% baseline
-    form_adj = max(-0.012, min(0.012, (recent_form - 0.55) * 0.02))
-
-    # Combined skill: ranking + surface specialty + recent form + H2H
-    total_skill = max(-0.07, min(0.07, skill_adj + surface_adj + form_adj + h2h_adj))
+    total_skill = max(-0.07, min(0.07, skill_adj + surface_adj))
 
     return PlayerStats(
         name=name,
-        first_serve_in=max(0.40, min(0.80, serve_data["first_serve_in"])),
-        first_serve_won=max(0.50, min(0.90, serve_data["first_serve_won"])),
-        second_serve_won=max(0.35, min(0.70, serve_data["second_serve_won"])),
-        return_adj=max(-0.06, min(0.06, return_adj)),
-        tiebreak_bonus=tb_bonus,
-        pressure_adj=pressure_adj,
-        pressure_ret_adj=pressure_ret_adj,
+        first_serve_in=fs_in,
+        first_serve_won=fs_won,
+        second_serve_won=ss_won,
         skill_adj=total_skill,
-        ace_rate=ace_rate,
-        df_rate=df_rate,
         data_fetched=data_fetched,
     )
 
-
-# ---------------------------------------------------------------------------
-# Sackmann CSV helpers
-# ---------------------------------------------------------------------------
-
-_SACKMANN_ATP_BASE = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master"
-_SACKMANN_WTA_BASE = "https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master"
-
-_csv_cache: dict[str, list[dict]] = {}
-
-_LEVEL_WEIGHTS_SK: dict[str, float] = {
-    "G": 4.0, "M": 4.0, "F": 3.0, "A": 2.0, "D": 1.5, "C": 0.8,
-}
-
-
-def _fetch_csv(filename: str, base: str = _SACKMANN_ATP_BASE) -> list[dict]:
-    cache_key = f"{base}/{filename}"
-    if cache_key in _csv_cache:
-        return _csv_cache[cache_key]
-    req = urllib.request.Request(
-        f"{base}/{filename}", headers={"User-Agent": "python-urllib/3"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            rows = list(csv.DictReader(io.StringIO(resp.read().decode("utf-8"))))
-        _csv_cache[cache_key] = rows
-        return rows
-    except Exception:
-        _csv_cache[cache_key] = []
-        return []
-
-
-def _find_player_id_sackmann(name: str, tour: str = "atp") -> Optional[str]:
-    base      = _SACKMANN_WTA_BASE if tour == "wta" else _SACKMANN_ATP_BASE
-    players_f = "wta_players.csv"  if tour == "wta" else "atp_players.csv"
-    search    = _resolve_name(name)
-    name_norm = _normalize(search)
-    name_parts = name_norm.split()
-    best: Optional[str] = None
-    for row in _fetch_csv(players_f, base):
-        full = f"{row.get('name_first', '')} {row.get('name_last', '')}".strip()
-        fn = _normalize(full)
-        if fn == name_norm:
-            return row["player_id"]
-        if best is None and all(p in fn for p in name_parts):
-            best = row["player_id"]
-    return best
-
-
-def _get_ranking_sackmann(player_id: str, tour: str = "atp") -> Optional[int]:
-    base      = _SACKMANN_WTA_BASE if tour == "wta" else _SACKMANN_ATP_BASE
-    rankings_f = "wta_rankings_current.csv" if tour == "wta" else "atp_rankings_current.csv"
-    for row in _fetch_csv(rankings_f, base):
-        if row.get("player") == player_id:
-            try:
-                return int(row["rank"])
-            except (ValueError, KeyError):
-                pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Tiebreak score parser
-# ---------------------------------------------------------------------------
-
-_TB_RE = re.compile(r"(\d+)-(\d+)\(")
-
-
-def _parse_tb_record(score: str, is_winner: bool) -> tuple[int, int]:
-    """
-    Parse tiebreak wins/losses from a Sackmann score string (winner's perspective).
-    Returns (tb_wins, tb_losses) for the given player.
-    """
-    tb_wins = tb_losses = 0
-    for m in _TB_RE.finditer(score):
-        w_games = int(m.group(1))
-        l_games = int(m.group(2))
-        if w_games > l_games:   # winner won this set's tiebreak
-            if is_winner:
-                tb_wins += 1
-            else:
-                tb_losses += 1
-        elif l_games > w_games: # loser won this set's tiebreak
-            if is_winner:
-                tb_losses += 1
-            else:
-                tb_wins += 1
-    return tb_wins, tb_losses
-
-
-# ---------------------------------------------------------------------------
-# Sackmann serve stats — extended (surface-filtered + BP/ace/TB/form)
-# ---------------------------------------------------------------------------
-
-def _sackmann_serve_stats(name: str, tour: str = "atp", surface: Optional[str] = None) -> dict:
-    """
-    Return aggregated serve/return/extended stats from Sackmann 2022-2024 data.
-
-    When *surface* is specified and ≥ _SURF_MIN_MATCHES matches exist on that
-    surface, the four core serve stats (1stIn, 1stWon, 2ndWon, retWon) are
-    Bayesian-blended toward the surface-specific values.  Extended stats
-    (ace_rate, df_rate, BP saved/converted, tiebreak win rate) are always
-    aggregated from all surfaces for robustness.
-    """
-    if tour == "wta":
-        avg = {
-            "first_serve_in":     _WTA_AVG_FIRST_SERVE_IN,
-            "first_serve_won":    _WTA_AVG_FIRST_SERVE_WON,
-            "second_serve_won":   _WTA_AVG_SECOND_SERVE_WON,
-            "return_won":         _WTA_AVG_RETURN_WON,
-            "_avg_return_won":    _WTA_AVG_RETURN_WON,
-            "ace_rate":           _WTA_AVG_ACE_RATE,
-            "df_rate":            _WTA_AVG_DF_RATE,
-            "bp_saved_pct":       _WTA_AVG_BP_SAVED,
-            "bp_converted_pct":   _WTA_AVG_BP_CONV,
-            "tb_win_pct":         0.5,
-            "recent_form":        0.5,
-            "_tour":              "wta",
-            "_n_matches":         0,
-        }
-        base        = _SACKMANN_WTA_BASE
-        match_files = ["wta_matches_2026.csv", "wta_matches_2025.csv", "wta_matches_2024.csv", "wta_matches_2023.csv"]
-    else:
-        avg = {
-            "first_serve_in":     _ATP_AVG_FIRST_SERVE_IN,
-            "first_serve_won":    _ATP_AVG_FIRST_SERVE_WON,
-            "second_serve_won":   _ATP_AVG_SECOND_SERVE_WON,
-            "return_won":         _ATP_AVG_RETURN_WON,
-            "_avg_return_won":    _ATP_AVG_RETURN_WON,
-            "ace_rate":           _ATP_AVG_ACE_RATE,
-            "df_rate":            _ATP_AVG_DF_RATE,
-            "bp_saved_pct":       _ATP_AVG_BP_SAVED,
-            "bp_converted_pct":   _ATP_AVG_BP_CONV,
-            "tb_win_pct":         0.5,
-            "recent_form":        0.5,
-            "_tour":              "atp",
-            "_n_matches":         0,
-        }
-        base        = _SACKMANN_ATP_BASE
-        match_files = ["atp_matches_2026.csv", "atp_matches_2025.csv", "atp_matches_2024.csv", "atp_matches_2023.csv"]
-
-    player_id = _find_player_id_sackmann(name, tour)
-    if not player_id:
-        return avg
-
-    # Collect all matches for this player across the three years
-    all_matches: list[dict] = []
-    for fname in match_files:
-        for row in _fetch_csv(fname, base):
-            if row.get("winner_id") == player_id or row.get("loser_id") == player_id:
-                all_matches.append(row)
-
-    all_matches.sort(key=lambda r: r.get("tourney_date", ""), reverse=True)
-
-    if not all_matches:
-        return avg
-
-    def _f(row: dict, key: str) -> float:
-        try:
-            return float(row.get(key) or 0)
-        except ValueError:
-            return 0.0
-
-    def _compute(matches: list[dict]) -> dict:
-        """One-pass weighted accumulation over a match list."""
-        a = {k: 0.0 for k in (
-            "fs_in", "fs_in_tot", "fs_won", "fs_won_tot",
-            "ss_won", "ss_won_tot", "ret_won", "ret_tot",
-            "aces", "aces_tot", "dfs", "dfs_tot",
-            "bp_saved", "bp_faced", "bp_conv", "bp_opp",
-            "tb_wins", "tb_losses",
-        )}
-        n = 0
-        for row in matches:
-            is_w = row.get("winner_id") == player_id
-            wt   = _LEVEL_WEIGHTS_SK.get(row.get("tourney_level", ""), 0.5)
-            px   = "w_" if is_w else "l_"
-            ox   = "l_" if is_w else "w_"
-
-            svpt       = _f(row, f"{px}svpt")
-            first_in   = _f(row, f"{px}1stIn")
-            first_won  = _f(row, f"{px}1stWon")
-            second_won = _f(row, f"{px}2ndWon")
-            aces       = _f(row, f"{px}ace")
-            dfs        = _f(row, f"{px}df")
-            bp_saved   = _f(row, f"{px}bpSaved")
-            bp_faced   = _f(row, f"{px}bpFaced")
-            opp_svpt      = _f(row, f"{ox}svpt")
-            opp_1st_won   = _f(row, f"{ox}1stWon")
-            opp_2nd_won   = _f(row, f"{ox}2ndWon")
-            opp_bp_faced  = _f(row, f"{ox}bpFaced")
-            opp_bp_saved  = _f(row, f"{ox}bpSaved")
-
-            if svpt > 0:
-                second_att = max(0.0, svpt - first_in)
-                a["fs_in"]     += first_in * wt
-                a["fs_in_tot"] += svpt * wt
-                if first_in > 0:
-                    a["fs_won"]     += first_won * wt
-                    a["fs_won_tot"] += first_in * wt
-                if second_att > 0:
-                    a["ss_won"]     += second_won * wt
-                    a["ss_won_tot"] += second_att * wt
-                a["aces"]     += aces * wt
-                a["aces_tot"] += svpt * wt
-                a["dfs"]      += dfs * wt
-                a["dfs_tot"]  += second_att * wt
-
-            if opp_svpt > 0:
-                a["ret_won"] += (opp_svpt - opp_1st_won - opp_2nd_won) * wt
-                a["ret_tot"] += opp_svpt * wt
-
-            # Break point stats (unweighted — more data is better here)
-            if bp_faced > 0:
-                a["bp_saved"] += bp_saved
-                a["bp_faced"] += bp_faced
-            if opp_bp_faced > 0:
-                a["bp_conv"] += max(0.0, opp_bp_faced - opp_bp_saved)
-                a["bp_opp"]  += opp_bp_faced
-
-            # Tiebreak record from score string
-            score = row.get("score", "")
-            if score:
-                tw, tl = _parse_tb_record(score, is_w)
-                a["tb_wins"]   += tw
-                a["tb_losses"] += tl
-
-            n += 1
-
-        def _r(num: str, den: str, default: float) -> float:
-            return a[num] / a[den] if a[den] else default
-
-        tb_total = a["tb_wins"] + a["tb_losses"]
-        return {
-            "first_serve_in":   _r("fs_in",   "fs_in_tot",   avg["first_serve_in"]),
-            "first_serve_won":  _r("fs_won",   "fs_won_tot",  avg["first_serve_won"]),
-            "second_serve_won": _r("ss_won",   "ss_won_tot",  avg["second_serve_won"]),
-            "return_won":       _r("ret_won",  "ret_tot",     avg["return_won"]),
-            "ace_rate":         _r("aces",     "aces_tot",    avg["ace_rate"]),
-            "df_rate":          _r("dfs",      "dfs_tot",     avg["df_rate"]),
-            "bp_saved_pct":     _r("bp_saved", "bp_faced",    avg["bp_saved_pct"]),
-            "bp_converted_pct": _r("bp_conv",  "bp_opp",      avg["bp_converted_pct"]),
-            "tb_win_pct":       a["tb_wins"] / tb_total if tb_total else 0.5,
-            "_n_matches":       n,
-        }
-
-    # All-surface stats (always computed — extended stats live here)
-    all_stats = _compute(all_matches[:_STAT_LOOKBACK])
-
-    # Surface-specific blend for the four core serve stats
-    surf_key = _SACKMANN_SURFACE.get(surface) if surface else None
-    if surf_key:
-        surf_matches = [m for m in all_matches if m.get("surface", "") == surf_key]
-        n_surf = len(surf_matches)
-        if n_surf >= _SURF_MIN_MATCHES:
-            surf_stats = _compute(surf_matches[:_STAT_LOOKBACK])
-            # Bayesian-style weight: saturates toward surface stats as n_surf grows
-            w_s = min(0.85, n_surf / (n_surf + _SURF_MIN_MATCHES))
-            for k in ("first_serve_in", "first_serve_won", "second_serve_won", "return_won"):
-                all_stats[k] = w_s * surf_stats[k] + (1.0 - w_s) * all_stats[k]
-        elif n_surf >= 3:
-            surf_stats = _compute(surf_matches)
-            w_s = n_surf / (2.0 * _SURF_MIN_MATCHES)
-            for k in ("first_serve_in", "first_serve_won", "second_serve_won", "return_won"):
-                all_stats[k] = w_s * surf_stats[k] + (1.0 - w_s) * all_stats[k]
-
-    # Recent form: win rate over last _FORM_LOOKBACK matches (all surfaces)
-    recent = all_matches[:_FORM_LOOKBACK]
-    wins = sum(1 for m in recent if m.get("winner_id") == player_id)
-    all_stats["recent_form"] = wins / len(recent) if recent else 0.5
-
-    # Metadata
-    all_stats["_avg_return_won"] = avg["return_won"]
-    all_stats["_tour"] = tour
-
-    # Blend with tour averages when total data is thin
-    n = all_stats["_n_matches"]
-    if n < _SACKMANN_MIN_MATCHES:
-        w = n / _SACKMANN_MIN_MATCHES
-        for k in ("first_serve_in", "first_serve_won", "second_serve_won", "return_won"):
-            all_stats[k] = w * all_stats[k] + (1.0 - w) * avg[k]
-
-    return all_stats
-
-
-# ---------------------------------------------------------------------------
-# Head-to-head record from Sackmann historical data
-# ---------------------------------------------------------------------------
-
-def _sackmann_h2h(name_a: str, name_b: str, tour: str = "atp") -> tuple[int, int]:
-    """
-    Return (wins_by_a, wins_by_b) from Sackmann 2022–2024 match data.
-    Returns (0, 0) if either player cannot be identified or tour is cross-tour.
-    """
-    base   = _SACKMANN_WTA_BASE if tour == "wta" else _SACKMANN_ATP_BASE
-    suffix = "wta"              if tour == "wta" else "atp"
-    match_files = [
-        f"{suffix}_matches_2024.csv",
-        f"{suffix}_matches_2023.csv",
-        f"{suffix}_matches_2022.csv",
-    ]
-    pid_a = _find_player_id_sackmann(name_a, tour)
-    pid_b = _find_player_id_sackmann(name_b, tour)
-    if not pid_a or not pid_b:
-        return 0, 0
-
-    wins_a = wins_b = 0
-    for fname in match_files:
-        for row in _fetch_csv(fname, base):
-            w_id = row.get("winner_id", "")
-            l_id = row.get("loser_id", "")
-            if w_id == pid_a and l_id == pid_b:
-                wins_a += 1
-            elif w_id == pid_b and l_id == pid_a:
-                wins_b += 1
-
-    return wins_a, wins_b
 
 
 # ---------------------------------------------------------------------------
@@ -1064,250 +683,92 @@ def predict_match_by_name(
     player_b_name: str,
     config: MatchConfig,
     n_simulations: int = DEFAULT_SIMULATIONS,
-    use_sackmann: bool = False,
 ) -> SimulationResult:
     """
-    Predict a match outcome by player name.
+    Predict a match outcome by player name using Tennis Abstract Elo data.
 
-    Primary path (use_sackmann=False)
-    ──────────────────────────────────
     1. Looks up each player in Tennis Abstract ATP then WTA Elo tables.
-    2. Derives a surface-specific skill adjustment from hElo / cElo / gElo.
-    3. Fetches surface-filtered serve/return/extended stats from Sackmann
-       2022–2024 match CSVs (ace rate, DF rate, BP saved/converted, TB win%).
-    4. Fetches H2H record from Sackmann and applies a small adjustment.
-    5. Falls back to Sackmann ranking CSVs for rank-based skill_adj when
-       the player has no Tennis Abstract entry.
-
-    Sackmann path (use_sackmann=True)
-    ───────────────────────────────────
-    Skips Tennis Abstract; uses Sackmann rankings + serve stats.
+    2. Computes win probability from surface-specific Elo (hElo / cElo / gElo).
+    3. Derives a surface specialty adjustment from surface Elo vs overall Elo.
+    4. Builds PlayerStats using tour-average serve profiles differentiated
+       by ranking-based skill_adj and surface_adj.
     """
-    serve_source_a = serve_source_b = "Sackmann 2024"
+    ta_atp = _get_ta_atp()
+    ta_wta = _get_ta_wta()
+
+    def _lookup(name: str):
+        e = _find_in_ta(name, ta_atp)
+        return e if e else _find_in_ta(name, ta_wta)
+
+    entry_a = _lookup(player_a_name)
+    entry_b = _lookup(player_b_name)
+
+    tour_a = entry_a["tour"] if entry_a else "atp"
+    tour_b = entry_b["tour"] if entry_b else "atp"
+    rank_a = entry_a["rank"] if entry_a else None
+    rank_b = entry_b["rank"] if entry_b else None
+    surf_adj_a = _ta_surface_adj(entry_a, config.surface) if entry_a else 0.0
+    surf_adj_b = _ta_surface_adj(entry_b, config.surface) if entry_b else 0.0
+
+    # ── Elo-calibrated win probability ────────────────────────────────────────
     elo_prob_a: Optional[float] = None
+    if entry_a and entry_b:
+        elo_a = _surface_elo(entry_a, config.surface)
+        elo_b = _surface_elo(entry_b, config.surface)
+        elo_prob_a = max(0.02, min(0.98, _elo_win_prob(elo_a, elo_b)))
 
-    if not use_sackmann:
-        ta_atp = _get_ta_atp()
-        ta_wta = _get_ta_wta()
-
-        def _lookup(name: str):
-            e = _find_in_ta(name, ta_atp)
-            if e:
-                return e
-            return _find_in_ta(name, ta_wta)
-
-        entry_a = _lookup(player_a_name)
-        entry_b = _lookup(player_b_name)
-
-        tour_a = entry_a["tour"] if entry_a else "atp"
-        tour_b = entry_b["tour"] if entry_b else "atp"
-
-        rank_a = entry_a["rank"] if entry_a else None
-        rank_b = entry_b["rank"] if entry_b else None
-
-        surf_adj_a = _ta_surface_adj(entry_a, config.surface) if entry_a else 0.0
-        surf_adj_b = _ta_surface_adj(entry_b, config.surface) if entry_b else 0.0
-
-        # Surface-filtered serve/return/extended stats
-        sk_a = _sackmann_serve_stats(player_a_name, tour_a, config.surface)
-        sk_b = _sackmann_serve_stats(player_b_name, tour_b, config.surface)
-
-        # Ranking fallback when not in Tennis Abstract
-        if rank_a is None:
-            pid = _find_player_id_sackmann(player_a_name, tour_a)
-            rank_a = _get_ranking_sackmann(pid, tour_a) if pid else None
-        if rank_b is None:
-            pid = _find_player_id_sackmann(player_b_name, tour_b)
-            rank_b = _get_ranking_sackmann(pid, tour_b) if pid else None
-
-        # H2H adjustment (same-tour matches only)
-        h2h_adj_a = h2h_adj_b = 0.0
-        h2h_str = "n/a"
-        h2h_wins_a = h2h_wins_b = 0
-        if tour_a == tour_b:
-            wins_a, wins_b = _sackmann_h2h(player_a_name, player_b_name, tour_a)
-            h2h_wins_a, h2h_wins_b = wins_a, wins_b
-            n_h2h = wins_a + wins_b
-            if n_h2h >= 3:
-                h2h_rate_a = wins_a / n_h2h
-                raw_adj = (h2h_rate_a - 0.5) * 0.03
-                h2h_adj_a = max(-0.015, min(0.015, raw_adj))
-                h2h_adj_b = -h2h_adj_a
-                h2h_str = f"{wins_a}-{wins_b}"
-            elif n_h2h > 0:
-                h2h_str = f"{wins_a}-{wins_b} (too few)"
-
-        # ── Elo-calibrated win probability (primary output, tracks sportsbook lines) ──
-        elo_prob_a = None
-        if entry_a and entry_b:
-            elo_a = _surface_elo(entry_a, config.surface)
-            elo_b = _surface_elo(entry_b, config.surface)
-            base_elo_prob = _elo_win_prob(elo_a, elo_b)
-
-            # Staleness-corrected form: when TA rank and Sackmann (Dec-2024) rank
-            # differ greatly, the player's level changed → blend stale Sackmann
-            # form with a rank-trajectory signal derived from how much they moved.
-            _pid_a_s = _find_player_id_sackmann(player_a_name, tour_a)
-            _pid_b_s = _find_player_id_sackmann(player_b_name, tour_b)
-            _sack_r_a = _get_ranking_sackmann(_pid_a_s, tour_a) if _pid_a_s else None
-            _sack_r_b = _get_ranking_sackmann(_pid_b_s, tour_b) if _pid_b_s else None
-
-            def _staleness_adj_form(ta_r, sack_r, raw_form):
-                if not ta_r or not sack_r:
-                    return raw_form
-                ratio = max(ta_r, sack_r) / min(ta_r, sack_r)
-                stale = max(0.0, min(1.0, (ratio - 1.0) / 2.0))
-                # sack_r/ta_r > 1 means player improved (was ranked lower = worse) → hot
-                # sack_r/ta_r < 1 means player declined (was ranked higher = better) → cold
-                rank_form = max(0.0, min(1.0, 0.5 + math.log(sack_r / ta_r) * 0.1))
-                return (1.0 - stale) * raw_form + stale * rank_form
-
-            form_a = _staleness_adj_form(rank_a, _sack_r_a, sk_a.get("recent_form", 0.5))
-            form_b = _staleness_adj_form(rank_b, _sack_r_b, sk_b.get("recent_form", 0.5))
-            form_adj_elo = max(-0.20, min(0.20, (form_a - form_b) * 0.55))
-
-            # H2H adjustment: persistent head-to-head edge
-            n_h2h_elo = h2h_wins_a + h2h_wins_b
-            h2h_adj_elo = 0.0
-            if n_h2h_elo >= 2:
-                h2h_adj_elo = max(-0.09, min(0.09, (h2h_wins_a / n_h2h_elo - 0.5) * 0.18))
-
-            elo_prob_a = max(0.02, min(0.98, base_elo_prob + form_adj_elo + h2h_adj_elo))
-
-            # Rank-probability cap: prevent surface-Elo overcorrection (e.g. a clay
-            # specialist whose hard-court Elo is far below their overall ranking).
-            # elo_prob_a is capped within ±10pp of the ATP-rank-derived probability.
-            if rank_a is not None and rank_b is not None:
-                _rank_elo_a = 2200.0 - 260.0 * math.log10(max(1, rank_a))
-                _rank_elo_b = 2200.0 - 260.0 * math.log10(max(1, rank_b))
-                _rank_prob = _elo_win_prob(_rank_elo_a, _rank_elo_b)
-                _RANK_CAP = 0.10
-                elo_prob_a = max(_rank_prob - _RANK_CAP,
-                                 min(_rank_prob + _RANK_CAP, elo_prob_a))
-
-            print(
-                f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
-                f"({_american_odds(elo_prob_a)})  "
-                f"base={base_elo_prob:.3f} eloA={elo_a:.0f} eloB={elo_b:.0f}  "
-                f"formA={form_a:.2f}(sackRk={_sack_r_a}) "
-                f"formB={form_b:.2f}(sackRk={_sack_r_b}) "
-                f"form_adj={form_adj_elo:+.3f}  h2h={h2h_adj_elo:+.3f}"
-            )
-
-        found_a = entry_a is not None
-        found_b = entry_b is not None
-
-        # ── Ranking-based Elo fallback (when Tennis Abstract fetch failed) ──────
-        if elo_prob_a is None and rank_a is not None and rank_b is not None:
-            def _rank_to_elo(r: int) -> float:
-                # Maps official rank → approximate Tennis Abstract Elo scale
-                return 2200.0 - 260.0 * math.log10(max(1, r))
-            elo_a_synth = _rank_to_elo(rank_a)
-            elo_b_synth = _rank_to_elo(rank_b)
-            base_prob = _elo_win_prob(elo_a_synth, elo_b_synth)
-            form_a_fb = sk_a.get("recent_form", 0.5)
-            form_b_fb = sk_b.get("recent_form", 0.5)
-            form_adj_fb = max(-0.20, min(0.20, (form_a_fb - form_b_fb) * 0.55))
-            n_h2h_fb = h2h_wins_a + h2h_wins_b
-            h2h_adj_fb = 0.0
-            if n_h2h_fb >= 2:
-                h2h_adj_fb = max(-0.09, min(0.09, (h2h_wins_a / n_h2h_fb - 0.5) * 0.18))
-            elo_prob_a = max(0.02, min(0.98, base_prob + form_adj_fb + h2h_adj_fb))
-            print(
-                f"  [RankElo] {player_a_name} win prob: {elo_prob_a:.3f}  "
-                f"({_american_odds(elo_prob_a)})  rankA={rank_a} rankB={rank_b}  "
-                f"eloA={elo_a_synth:.0f} eloB={elo_b_synth:.0f}  "
-                f"formA={form_a_fb:.2f} formB={form_b_fb:.2f} form_adj={form_adj_fb:+.3f}"
-            )
-
-        player_a = _build_player_stats(
-            player_a_name, rank_a, sk_a,
-            data_fetched=found_a, surface_adj=surf_adj_a, h2h_adj=h2h_adj_a,
-        )
-        player_b = _build_player_stats(
-            player_b_name, rank_b, sk_b,
-            data_fetched=found_b, surface_adj=surf_adj_b, h2h_adj=h2h_adj_b,
-        )
-
-        src_a = f"Tennis Abstract ({tour_a.upper()}) + Sackmann serve stats"
-        src_b = f"Tennis Abstract ({tour_b.upper()}) + Sackmann serve stats"
-        if not found_a:
-            src_a = "Sackmann 2024 (not in Tennis Abstract)"
-        if not found_b:
-            src_b = "Sackmann 2024 (not in Tennis Abstract)"
-
-        serve_source_a = src_a
-        serve_source_b = src_b
+        # Rank-probability cap: prevent surface-Elo overcorrection
+        if rank_a is not None and rank_b is not None:
+            _rank_elo_a = 2200.0 - 260.0 * math.log10(max(1, rank_a))
+            _rank_elo_b = 2200.0 - 260.0 * math.log10(max(1, rank_b))
+            _rank_prob = _elo_win_prob(_rank_elo_a, _rank_elo_b)
+            elo_prob_a = max(_rank_prob - 0.10, min(_rank_prob + 0.10, elo_prob_a))
 
         print(
-            f"  [TA] {player_a_name}: rank={rank_a or '?'}  "
-            f"fs_in={player_a.first_serve_in:.3f}  fs_won={player_a.first_serve_won:.3f}  "
-            f"ss_won={player_a.second_serve_won:.3f}  skill={player_a.skill_adj:+.4f}  "
-            f"surfAdj={surf_adj_a:+.4f}  "
-            f"bpSvd={sk_a.get('bp_saved_pct', 0):.3f}  "
-            f"bpCnv={sk_a.get('bp_converted_pct', 0):.3f}  "
-            f"tbW={sk_a.get('tb_win_pct', 0):.3f}  "
-            f"form={sk_a.get('recent_form', 0):.2f}  "
-            f"h2h={h2h_str}  src={serve_source_a}"
+            f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
+            f"({_american_odds(elo_prob_a)})  eloA={elo_a:.0f} eloB={elo_b:.0f}"
         )
+    elif rank_a is not None and rank_b is not None:
+        _rank_elo_a = 2200.0 - 260.0 * math.log10(max(1, rank_a))
+        _rank_elo_b = 2200.0 - 260.0 * math.log10(max(1, rank_b))
+        elo_prob_a = max(0.02, min(0.98, _elo_win_prob(_rank_elo_a, _rank_elo_b)))
         print(
-            f"  [TA] {player_b_name}: rank={rank_b or '?'}  "
-            f"fs_in={player_b.first_serve_in:.3f}  fs_won={player_b.first_serve_won:.3f}  "
-            f"ss_won={player_b.second_serve_won:.3f}  skill={player_b.skill_adj:+.4f}  "
-            f"surfAdj={surf_adj_b:+.4f}  "
-            f"bpSvd={sk_b.get('bp_saved_pct', 0):.3f}  "
-            f"bpCnv={sk_b.get('bp_converted_pct', 0):.3f}  "
-            f"tbW={sk_b.get('tb_win_pct', 0):.3f}  "
-            f"form={sk_b.get('recent_form', 0):.2f}  "
-            f"src={serve_source_b}"
+            f"  [RankElo] {player_a_name} win prob: {elo_prob_a:.3f}  "
+            f"({_american_odds(elo_prob_a)})  rankA={rank_a} rankB={rank_b}"
         )
 
-    else:
-        # ── Pure Sackmann fallback ────────────────────────────────────────────
-        sk_a = _sackmann_serve_stats(player_a_name, "atp", config.surface)
-        sk_b = _sackmann_serve_stats(player_b_name, "atp", config.surface)
+    # ── Build simulation stats ────────────────────────────────────────────────
+    player_a = _build_player_stats(
+        player_a_name, rank_a, tour_a,
+        data_fetched=entry_a is not None, surface_adj=surf_adj_a,
+    )
+    player_b = _build_player_stats(
+        player_b_name, rank_b, tour_b,
+        data_fetched=entry_b is not None, surface_adj=surf_adj_b,
+    )
 
-        pid_a  = _find_player_id_sackmann(player_a_name, "atp")
-        pid_b  = _find_player_id_sackmann(player_b_name, "atp")
-        rank_a = _get_ranking_sackmann(pid_a, "atp") if pid_a else None
-        rank_b = _get_ranking_sackmann(pid_b, "atp") if pid_b else None
-
-        wins_a, wins_b = _sackmann_h2h(player_a_name, player_b_name, "atp")
-        n_h2h = wins_a + wins_b
-        h2h_adj_a = h2h_adj_b = 0.0
-        if n_h2h >= 3:
-            raw_adj = ((wins_a / n_h2h) - 0.5) * 0.03
-            h2h_adj_a = max(-0.015, min(0.015, raw_adj))
-            h2h_adj_b = -h2h_adj_a
-
-        player_a = _build_player_stats(
-            player_a_name, rank_a, sk_a,
-            data_fetched=pid_a is not None, h2h_adj=h2h_adj_a,
-        )
-        player_b = _build_player_stats(
-            player_b_name, rank_b, sk_b,
-            data_fetched=pid_b is not None, h2h_adj=h2h_adj_b,
-        )
-
-        print(f"  [Sackmann] {player_a_name}: rank={rank_a or '?'}  skill={player_a.skill_adj:+.4f}  "
-              f"h2h={wins_a}-{wins_b}")
-        print(f"  [Sackmann] {player_b_name}: rank={rank_b or '?'}  skill={player_b.skill_adj:+.4f}")
+    print(
+        f"  [TA] {player_a_name}: rank={rank_a or '?'}  "
+        f"skill={player_a.skill_adj:+.4f}  surfAdj={surf_adj_a:+.4f}"
+    )
+    print(
+        f"  [TA] {player_b_name}: rank={rank_b or '?'}  "
+        f"skill={player_b.skill_adj:+.4f}  surfAdj={surf_adj_b:+.4f}"
+    )
 
     # ── Run simulation ────────────────────────────────────────────────────────
     result = run_simulation(player_a, player_b, config, n_simulations)
     result.elo_prob_a = elo_prob_a
 
-    for p, src in ((player_a, serve_source_a), (player_b, serve_source_b)):
+    for p, tour in ((player_a, tour_a), (player_b, tour_b)):
         if not p.data_fetched:
             result.warnings.append(
-                f"'{p.name}' not found in any data source — using tour average stats."
+                f"'{p.name}' not found in Tennis Abstract — using tour-average serve stats."
             )
+        src = f"Tennis Abstract ({tour.upper()})"
         result.stats_summary.append(
             f"**{p.name}** — source: *{src}*  \n"
-            f"1stIn={p.first_serve_in:.3f}  1stWon={p.first_serve_won:.3f}  "
-            f"2ndWon={p.second_serve_won:.3f}  retAdj={p.return_adj:+.3f}  "
-            f"skillAdj={p.skill_adj:+.4f}  "
-            f"pressAdj={p.pressure_adj:+.4f}  tbBonus={p.tiebreak_bonus:+.4f}"
+            f"skillAdj={p.skill_adj:+.4f}  surfAdj={surf_adj_a if p is player_a else surf_adj_b:+.4f}"
         )
 
     return result
@@ -1319,9 +780,8 @@ def predict_match_by_name(
 
 def get_player_names(top_n: int = 500) -> list[str]:
     """
-    Return up to top_n ATP and top_n WTA player names sorted by official rank.
-    Primary source: Tennis Abstract Elo pages.
-    Fallback: Sackmann ranking CSVs (ATP only) when Tennis Abstract is unavailable.
+    Return up to top_n ATP and top_n WTA player names sorted by official rank,
+    sourced from Tennis Abstract Elo pages.
     """
     atp_players = _get_ta_atp()
     wta_players = _get_ta_wta()
@@ -1330,41 +790,7 @@ def get_player_names(top_n: int = 500) -> list[str]:
         ranked = sorted(players, key=lambda e: (e["rank"], e["elo_rank"]))
         return [e["name"] for e in ranked[:top_n]]
 
-    atp_names = _sorted_names(atp_players)
-    wta_names = _sorted_names(wta_players)
-
-    if atp_names or wta_names:
-        return atp_names + wta_names
-
-    # Sackmann fallback (ATP only) if Tennis Abstract is unreachable
-    print("  [TennisAbstract] Both Elo pages failed — falling back to Sackmann ATP.")
-    id_to_name: dict[str, str] = {}
-    for row in _fetch_csv("atp_players.csv"):
-        pid = row.get("player_id", "")
-        if pid:
-            id_to_name[pid] = f"{row.get('name_first','')} {row.get('name_last','')}".strip()
-
-    all_rows   = _fetch_csv("atp_rankings_current.csv")
-    latest_date = max(
-        (r.get("ranking_date", "") for r in all_rows if r.get("ranking_date")),
-        default="",
-    )
-    ranked: list[tuple[int, str]] = []
-    seen: set[str] = set()
-    for row in all_rows:
-        if row.get("ranking_date") != latest_date:
-            continue
-        pid = row.get("player", "")
-        if pid in seen or pid not in id_to_name:
-            continue
-        try:
-            rank = int(row["rank"])
-        except (KeyError, ValueError, TypeError):
-            continue
-        seen.add(pid)
-        ranked.append((rank, id_to_name[pid]))
-    ranked.sort()
-    return [name for _, name in ranked[:top_n]]
+    return _sorted_names(atp_players) + _sorted_names(wta_players)
 
 
 def ta_player_lookup(name: str) -> Optional[dict]:

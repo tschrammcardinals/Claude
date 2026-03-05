@@ -5,7 +5,6 @@ from tennis_predictor import (
     _american_odds,
     get_player_names,
     predict_match_by_name,
-    ta_player_lookup,
 )
 
 st.set_page_config(page_title="Tennis Match Predictor", layout="centered")
@@ -25,9 +24,8 @@ players = _load_players()
 # Session state
 # ---------------------------------------------------------------------------
 
-for key in ("prompt_missing", "prompt_players", "prompt_cfg", "sim_result"):
-    if key not in st.session_state:
-        st.session_state[key] = None
+if "sim_result" not in st.session_state:
+    st.session_state.sim_result = None
 
 # ---------------------------------------------------------------------------
 # Main form
@@ -50,12 +48,10 @@ best_of = st.radio("Format", [3, 5], horizontal=True)
 # Helper: run simulation and store result
 # ---------------------------------------------------------------------------
 
-def _run_sim(pa: str, pb: str, cfg: MatchConfig, use_sackmann: bool = False):
+def _run_sim(pa: str, pb: str, cfg: MatchConfig):
     with st.spinner(f"Simulating {pa} vs {pb}…"):
         try:
-            st.session_state.sim_result = predict_match_by_name(
-                pa, pb, cfg, use_sackmann=use_sackmann
-            )
+            st.session_state.sim_result = predict_match_by_name(pa, pb, cfg)
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -66,41 +62,7 @@ def _run_sim(pa: str, pb: str, cfg: MatchConfig, use_sackmann: bool = False):
 if st.button("Run Simulation", type="primary", disabled=not (player_a and player_b)):
     cfg = MatchConfig(surface=surface, best_of=best_of)
     st.session_state.sim_result = None
-
-    # Check if both players are found in Tennis Abstract data
-    missing = []
-    with st.spinner("Checking player data…"):
-        for name in (player_a, player_b):
-            if ta_player_lookup(name) is None:
-                missing.append(name)
-
-    if missing:
-        st.session_state.prompt_missing = missing
-        st.session_state.prompt_players = (player_a, player_b)
-        st.session_state.prompt_cfg = cfg
-    else:
-        _run_sim(player_a, player_b, cfg)
-
-# ---------------------------------------------------------------------------
-# Sackmann fallback prompt
-# ---------------------------------------------------------------------------
-
-if st.session_state.prompt_missing:
-    missing_str = " and ".join(f"**{n}**" for n in st.session_state.prompt_missing)
-    st.warning(
-        f"{missing_str} could not be found in Tennis Abstract data. "
-        "Use Sackmann 2024 data instead?"
-    )
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Yes — use Sackmann 2024", type="primary"):
-            pa, pb = st.session_state.prompt_players
-            cfg = st.session_state.prompt_cfg
-            st.session_state.prompt_missing = None
-            _run_sim(pa, pb, cfg, use_sackmann=True)
-    with c2:
-        if st.button("Cancel"):
-            st.session_state.prompt_missing = None
+    _run_sim(player_a, player_b, cfg)
 
 # ---------------------------------------------------------------------------
 # Results
@@ -138,7 +100,7 @@ if result:
                 st.metric(result.player_b, f"{result.win_prob_b * 100:.1f}%")
             st.caption(f"{result.n_simulations:,} point-by-point simulations")
     else:
-        # Sackmann-only fallback: no Elo data available
+        # Fallback: no Elo data available (player not found in Tennis Abstract)
         st.subheader("Win Probability")
         st.caption("Monte Carlo simulation (Elo data unavailable)")
         c1, c2 = st.columns(2)
