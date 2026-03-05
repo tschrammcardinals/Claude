@@ -425,6 +425,14 @@ _RETURN_ADJ_PER_ELO = 0.000150   # return-skill contribution per Elo point above
 _ATP_AVG_ELO        = 1550.0     # approximate ATP tour-average TA Elo
 _WTA_AVG_ELO        = 1500.0     # approximate WTA tour-average TA Elo
 
+# v2: recent form adjustment — Sackmann match results (last 52 weeks)
+_SACKMANN_ATP_URL  = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{year}.csv"
+_SACKMANN_WTA_URL  = "https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_matches_{year}.csv"
+_FORM_WEEKS        = 52     # rolling window
+_FORM_MIN_MATCHES  = 8      # minimum matches needed before form adj is applied
+_FORM_ELO_SCALE    = 300.0  # (win_rate - 0.50) * scale = raw Elo adjustment
+_FORM_ELO_CAP      = 75.0   # maximum Elo adjustment in either direction
+
 
 # ---------------------------------------------------------------------------
 # Name normalisation + aliases
@@ -465,6 +473,9 @@ _TA_WTA_URL = "https://www.tennisabstract.com/reports/wta_elo_ratings.html"
 
 _ta_atp_cache: Optional[list[dict]] = None
 _ta_wta_cache: Optional[list[dict]] = None
+
+_form_atp_cache: Optional[dict] = None
+_form_wta_cache: Optional[dict] = None
 
 
 class _EloTableParser(_BaseHTMLParser):
@@ -653,6 +664,105 @@ def _american_odds(prob: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Recent form — Sackmann match results
+# ---------------------------------------------------------------------------
+
+def _fetch_form_csv(url_template: str, tour: str) -> dict:
+    """
+    Download Sackmann match CSVs for the current and prior year, filter to
+    the last _FORM_WEEKS weeks, and return {normalized_name: [wins, losses]}.
+    Falls back to an empty dict on any network or parse failure.
+    """
+    import datetime
+    cutoff     = datetime.date.today() - datetime.timedelta(weeks=_FORM_WEEKS)
+    cutoff_int = int(cutoff.strftime("%Y%m%d"))
+    cur_year   = datetime.date.today().year
+    records: dict[str, list[int]] = {}
+
+    for year in (cur_year, cur_year - 1):
+        url = url_template.format(year=year)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                lines = resp.read().decode("utf-8", errors="replace").splitlines()
+        except Exception as exc:
+            print(f"  [Form] Could not fetch {url}: {exc}")
+            continue
+
+        if not lines:
+            continue
+
+        header = lines[0].split(",")
+        try:
+            date_idx   = header.index("tourney_date")
+            winner_idx = header.index("winner_name")
+            loser_idx  = header.index("loser_name")
+        except ValueError:
+            print(f"  [Form] Unexpected CSV format for {url}")
+            continue
+
+        for raw in lines[1:]:
+            cols = raw.split(",")
+            if len(cols) <= max(date_idx, winner_idx, loser_idx):
+                continue
+            try:
+                date_val = int(cols[date_idx].strip())
+            except ValueError:
+                continue
+            if date_val < cutoff_int:
+                continue
+            w = _normalize(cols[winner_idx].strip())
+            l = _normalize(cols[loser_idx].strip())
+            if w:
+                records.setdefault(w, [0, 0])[0] += 1
+            if l:
+                records.setdefault(l, [0, 0])[1] += 1
+
+    print(f"  [Form] Loaded recent form for {len(records)} {tour.upper()} players")
+    return records
+
+
+def _get_atp_form() -> dict:
+    global _form_atp_cache
+    if _form_atp_cache is None:
+        _form_atp_cache = _fetch_form_csv(_SACKMANN_ATP_URL, "atp")
+    return _form_atp_cache
+
+
+def _get_wta_form() -> dict:
+    global _form_wta_cache
+    if _form_wta_cache is None:
+        _form_wta_cache = _fetch_form_csv(_SACKMANN_WTA_URL, "wta")
+    return _form_wta_cache
+
+
+def _form_elo_adj(name: str, tour: str) -> float:
+    """
+    Return an Elo adjustment based on win rate over the last _FORM_WEEKS weeks.
+    Positive = above-average form, negative = below-average/declining form.
+    Returns 0.0 if the player has fewer than _FORM_MIN_MATCHES or isn't found.
+    """
+    form   = _get_atp_form() if tour == "atp" else _get_wta_form()
+    search = _normalize(_resolve_name(name))
+    parts  = search.split()
+
+    record = form.get(search)
+    if record is None:
+        for k, v in form.items():
+            if all(p in k for p in parts):
+                record = v
+                break
+
+    if record is None or sum(record) < _FORM_MIN_MATCHES:
+        return 0.0
+
+    wins, losses = record
+    win_rate = wins / (wins + losses)
+    adj = (win_rate - 0.50) * _FORM_ELO_SCALE
+    return max(-_FORM_ELO_CAP, min(_FORM_ELO_CAP, adj))
+
+
+# ---------------------------------------------------------------------------
 # Player stat assembly
 # ---------------------------------------------------------------------------
 
@@ -734,15 +844,18 @@ def predict_match_by_name(
 
     # ── Elo-calibrated win probability ────────────────────────────────────────
     elo_prob_a: Optional[float] = None
+    form_adj_a = _form_elo_adj(player_a_name, tour_a)
+    form_adj_b = _form_elo_adj(player_b_name, tour_b)
     if entry_a and entry_b:
-        elo_a = _surface_elo(entry_a, config.surface)
-        elo_b = _surface_elo(entry_b, config.surface)
+        elo_a = _surface_elo(entry_a, config.surface) + form_adj_a
+        elo_b = _surface_elo(entry_b, config.surface) + form_adj_b
         elo_prob_a = max(0.02, min(0.98, _elo_win_prob(elo_a, elo_b)))
         # v2: rank cap removed — TA surface Elo is trusted directly
 
         print(
             f"  [Elo] {player_a_name} win prob: {elo_prob_a:.3f}  "
-            f"({_american_odds(elo_prob_a)})  eloA={elo_a:.0f} eloB={elo_b:.0f}"
+            f"({_american_odds(elo_prob_a)})  "
+            f"eloA={elo_a:.0f}(form={form_adj_a:+.0f}) eloB={elo_b:.0f}(form={form_adj_b:+.0f})"
         )
     elif rank_a is not None and rank_b is not None:
         _rank_elo_a = 2200.0 - 375.0 * math.log10(max(1, rank_a))  # v2: scale 260 -> 375
@@ -783,10 +896,11 @@ def predict_match_by_name(
             result.warnings.append(
                 f"'{p.name}' not found in Tennis Abstract — using tour-average serve stats."
             )
-        src = f"Tennis Abstract ({tour.upper()})"
+        src = f"Tennis Abstract ({tour.upper()}) + Sackmann form"
+        fa  = form_adj_a if p is player_a else form_adj_b
         result.stats_summary.append(
             f"**{p.name}** — source: *{src}*  \n"
-            f"skillAdj={p.skill_adj:+.4f}  surfAdj={surf_adj_a if p is player_a else surf_adj_b:+.4f}"
+            f"skillAdj={p.skill_adj:+.4f}  surfAdj={surf_adj_a if p is player_a else surf_adj_b:+.4f}  formEloAdj={fa:+.1f}"
         )
 
     return result
