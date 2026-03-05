@@ -4,6 +4,7 @@ from tennis_predictor_v2 import (
     MatchConfig,
     _american_odds,
     get_player_names,
+    get_player_recent_matches,
     predict_match_by_name,
 )
 
@@ -126,3 +127,45 @@ if result:
     with st.expander("Player stats used in simulation"):
         for line in result.stats_summary:
             st.markdown(line)
+
+    # ── Recent match results ──────────────────────────────────────────────────
+    st.subheader("Recent Match Results")
+    st.caption("Source: Tennis Abstract — last 10 completed matches per player")
+
+    @st.cache_data(show_spinner=False)
+    def _load_recent(name: str) -> list[dict]:
+        return get_player_recent_matches(name, n=10)
+
+    col_a, col_b = st.columns(2)
+
+    for col, player_name in ((col_a, result.player_a), (col_b, result.player_b)):
+        with col:
+            st.markdown(f"**{player_name}**")
+            with st.spinner(f"Loading recent matches…"):
+                matches = _load_recent(player_name)
+            if not matches:
+                st.caption("No recent match data found.")
+            else:
+                wins = sum(1 for m in matches if m["result"] == "W")
+                st.caption(f"Last {len(matches)} matches: {wins}W – {len(matches)-wins}L")
+                import pandas as pd
+                df_matches = pd.DataFrame([
+                    {
+                        "Date":       m["date"],
+                        "W/L":        m["result"],
+                        "Opponent":   m["opponent"],
+                        "Tournament": m["tournament"],
+                        "Surface":    m["surface"].capitalize(),
+                        "Score":      m["score"],
+                    }
+                    for m in matches
+                ])
+                st.dataframe(
+                    df_matches,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "W/L": st.column_config.TextColumn(width="small"),
+                        "Date": st.column_config.TextColumn(width="small"),
+                    },
+                )

@@ -29,6 +29,7 @@ Run `python tennis_predictor_v2.py` for a demo.
 
 import math
 import random
+import re
 import statistics
 import unicodedata
 import urllib.request
@@ -475,9 +476,12 @@ class _EloTableParser(_BaseHTMLParser):
         self._in_tbody = False
         self._in_row   = False
         self._in_cell  = False
+        self._cell_idx  = 0
         self._row_cells: list[str] = []
         self._cell_buf  = ""
+        self._row_player_id: str = ""
         self.rows: list[list[str]] = []
+        self.player_ids: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "tbody":
@@ -485,9 +489,18 @@ class _EloTableParser(_BaseHTMLParser):
         elif self._in_tbody and tag == "tr":
             self._in_row = True
             self._row_cells = []
+            self._cell_idx = 0
+            self._row_player_id = ""
         elif self._in_row and tag == "td":
             self._in_cell = True
             self._cell_buf = ""
+        elif self._in_row and self._in_cell and self._cell_idx == 1 and tag == "a":
+            # Name cell: capture the player_id from href (?p=PlayerID)
+            attr_dict = dict(attrs)
+            href = attr_dict.get("href", "")
+            m = re.search(r'\?p=([^&"]+)', href)
+            if m:
+                self._row_player_id = m.group(1)
 
     def handle_data(self, data):
         if self._in_cell:
@@ -496,10 +509,12 @@ class _EloTableParser(_BaseHTMLParser):
     def handle_endtag(self, tag):
         if tag == "td" and self._in_cell:
             self._row_cells.append(self._cell_buf.replace("\xa0", " ").strip())
+            self._cell_idx += 1
             self._in_cell = False
         elif tag == "tr" and self._in_row:
             if len(self._row_cells) >= 16:
                 self.rows.append(self._row_cells)
+                self.player_ids.append(self._row_player_id)
             self._in_row = False
         elif tag == "tbody":
             self._in_tbody = False
@@ -526,7 +541,7 @@ def _fetch_ta_elo(url: str, tour: str) -> list[dict]:
     parser.feed(html_src)
 
     results = []
-    for row in parser.rows:
+    for row, pid in zip(parser.rows, parser.player_ids):
         try:
             name = row[1].strip()
             if not name:
@@ -554,14 +569,15 @@ def _fetch_ta_elo(url: str, tour: str) -> list[dict]:
             rank = off_rank if off_rank else elo_rank
 
             results.append({
-                "name":     name,
-                "elo_rank": elo_rank,
-                "elo":      elo,
-                "h_elo":    h_elo or elo,
-                "c_elo":    c_elo or elo,
-                "g_elo":    g_elo or elo,
-                "rank":     rank,
-                "tour":     tour,
+                "name":      name,
+                "elo_rank":  elo_rank,
+                "elo":       elo,
+                "h_elo":     h_elo or elo,
+                "c_elo":     c_elo or elo,
+                "g_elo":     g_elo or elo,
+                "rank":      rank,
+                "tour":      tour,
+                "player_id": pid,
             })
         except (IndexError, ValueError):
             continue
@@ -817,6 +833,118 @@ def ta_player_lookup(name: str) -> Optional[dict]:
     atp = _get_ta_atp()
     wta = _get_ta_wta()
     return _find_in_ta(name, atp) or _find_in_ta(name, wta)
+
+
+# ---------------------------------------------------------------------------
+# Recent match data — Tennis Abstract JS fragments
+# ---------------------------------------------------------------------------
+
+_TA_JSFRAG_URL = "https://www.tennisabstract.com/jsfrags/{player_id}.js"
+
+_ta_recent_cache: dict[str, list[dict]] = {}
+
+
+def _fetch_recent_matches(player_id: str, n: int = 10) -> list[dict]:
+    """
+    Fetch the last *n* completed matches for *player_id* from the Tennis Abstract
+    JS fragment file (tennisabstract.com/jsfrags/{player_id}.js).
+
+    Returns a list of dicts (most recent first):
+      date, tournament, surface, round, player_rank, opp_rank,
+      result ('W'/'L'), opponent, opp_player_id, score,
+      ace_rate, df_rate, first_serve_in, first_serve_won, second_serve_won, bp_saved
+    """
+    if player_id in _ta_recent_cache:
+        return _ta_recent_cache[player_id][:n]
+
+    url = _TA_JSFRAG_URL.format(player_id=player_id)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            js = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  [TA recent] Failed to fetch {url}: {e}")
+        return []
+
+    # The file wraps an HTML snippet in a JS template literal:
+    #   var player_frag = `...html...`; var ...
+    m = re.search(r'var player_frag = `(.*?)`\s*;?\s*var ', js, re.DOTALL)
+    html_content = m.group(1) if m else js
+
+    tbl = re.search(r'<table id="recent-results".*?</table>', html_content, re.DOTALL)
+    if not tbl:
+        return []
+
+    rows_html = re.findall(r'<tr>.*?</tr>', tbl.group(0), re.DOTALL)
+    matches: list[dict] = []
+
+    def _clean(s: str) -> str:
+        return re.sub(r'<[^>]+>', '', s).strip()
+
+    def _safe_float(s: str) -> Optional[float]:
+        try:
+            return float(s.rstrip('%'))
+        except (ValueError, AttributeError):
+            return None
+
+    for row in rows_html[1:]:   # skip header row
+        cells_html = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+        if len(cells_html) < 8:
+            continue
+
+        cells = [_clean(c) for c in cells_html]
+        score = cells[7] if len(cells) > 7 else ""
+        if not score:
+            continue  # upcoming / walkover with no score
+
+        desc_html = cells_html[6]
+        desc_text = cells[6]
+        if " d. " not in desc_text:
+            continue  # retirement or other non-standard result
+
+        # Win: <b>PlayerName</b> d. <a>Opponent</a>
+        # Loss: <a>Opponent</a> d. <b>PlayerName</b>
+        b_pos = desc_html.find("<b>")
+        d_pos = desc_html.find(" d. ")
+        result = "W" if (b_pos >= 0 and b_pos < d_pos) else "L"
+
+        # Opponent name and player_id
+        opp_m = re.search(r'href="[^"]*\?p=([^"&]+)"[^>]*>([^<]+)</a>', desc_html)
+        opponent     = opp_m.group(2).strip() if opp_m else ""
+        opp_player_id = opp_m.group(1) if opp_m else None
+
+        matches.append({
+            "date":             cells[0],
+            "tournament":       cells[1],
+            "surface":          cells[2].lower(),
+            "round":            cells[3],
+            "player_rank":      cells[4],
+            "opp_rank":         cells[5],
+            "result":           result,
+            "opponent":         opponent,
+            "opp_player_id":    opp_player_id,
+            "score":            score,
+            "ace_rate":         _safe_float(cells[9])  if len(cells) > 9  else None,
+            "df_rate":          _safe_float(cells[10]) if len(cells) > 10 else None,
+            "first_serve_in":   _safe_float(cells[11]) if len(cells) > 11 else None,
+            "first_serve_won":  _safe_float(cells[12]) if len(cells) > 12 else None,
+            "second_serve_won": _safe_float(cells[13]) if len(cells) > 13 else None,
+            "bp_saved":         cells[14] if len(cells) > 14 else None,
+        })
+
+    _ta_recent_cache[player_id] = matches
+    return matches[:n]
+
+
+def get_player_recent_matches(name: str, n: int = 10) -> list[dict]:
+    """
+    Public API: fetch the last *n* completed matches for *name* from Tennis Abstract.
+    Returns a list of match dicts (most recent first), or [] if not found.
+    """
+    entry = ta_player_lookup(name)
+    if not entry or not entry.get("player_id"):
+        return []
+    return _fetch_recent_matches(entry["player_id"], n=n)
 
 
 # ---------------------------------------------------------------------------
