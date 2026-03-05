@@ -427,8 +427,8 @@ _ATP_AVG_ELO        = 1550.0     # approximate ATP tour-average TA Elo
 _WTA_AVG_ELO        = 1500.0     # approximate WTA tour-average TA Elo
 
 # Recent-form adjustment (applied to elo_prob_a)
-_FORM_WEIGHT  = 0.50   # fraction of net opponent-quality-adjusted form applied as prob shift
-_FORM_MAX_ADJ = 0.10   # hard cap: ±10 percentage points
+_FORM_WEIGHT  = 0.20   # fraction of net opponent-quality-adjusted form applied as prob shift
+_FORM_MAX_ADJ = 0.04   # hard cap: ±4 percentage points
 _FORM_MATCHES = 10     # how many recent matches to consider
 
 
@@ -444,6 +444,10 @@ _NAME_ALIASES: dict[str, str] = {
     "pablo carreno":        "Pablo Carreno Busta",
     "albert ramos":         "Albert Ramos Vinolas",
     "feliciano lopez":      "Feliciano Lopez",
+    # spelling variants
+    "maroszan":             "Fabian Marozsan",
+    "z. svadja":            "Zachary Svajda",
+    "svadja":               "Zachary Svajda",
 }
 
 
