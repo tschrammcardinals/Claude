@@ -107,3 +107,80 @@ Only **head-to-head match-winner markets** are included (not tournament-winner, 
 - Kalshi requires **authentication** for most API endpoints. Public market data is available, but authenticated access is more reliable.
 - The scraper respects Kalshi's pagination (`cursor`-based) and fetches up to 4,000 results per series.
 - Auto-refresh uses Google Apps Script [time-based triggers](https://developers.google.com/apps-script/guides/triggers/installable).
+
+---
+
+# Desktop Notifier — `kalshi_tennis_notifier.py`
+
+Runs on your computer and sends a desktop notification whenever a **new tennis market** opens on Kalshi. Polls every 5 minutes.
+
+## Requirements
+
+```bash
+pip install requests cryptography plyer
+```
+
+> `plyer` is optional but enables proper desktop pop-up notifications on Linux, macOS, and Windows. Without it, notifications are printed to the terminal.
+
+## Setup
+
+```bash
+python3 kalshi_tennis_notifier.py --setup
+```
+
+Follow the prompts to paste your **Kalshi API Key ID** and **RSA Private Key**. Credentials are saved to `~/.kalshi_credentials` (chmod 600).
+
+**Alternative:** Set environment variables instead:
+```bash
+export KALSHI_API_KEY_ID="your-key-id"
+export KALSHI_PRIVATE_KEY="$(cat your_key.pem)"
+python3 kalshi_tennis_notifier.py
+```
+
+## Run
+
+```bash
+python3 kalshi_tennis_notifier.py
+```
+
+On first launch it silently seeds all currently-open tennis markets so you only get notified about genuinely *new* ones going forward.
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `--setup` | Interactive credential setup |
+| `--interval N` | Poll every N seconds (default: 300) |
+| `--reset` | Clear seen-market state (re-notify on all current markets) |
+
+## Run in the background
+
+**Linux/macOS:**
+```bash
+nohup python3 kalshi_tennis_notifier.py > ~/kalshi_notifier.log 2>&1 &
+```
+
+**Run at login (systemd user service on Linux):**
+```ini
+# ~/.config/systemd/user/kalshi-tennis.service
+[Unit]
+Description=Kalshi Tennis Market Notifier
+
+[Service]
+ExecStart=/usr/bin/python3 /path/to/kalshi_tennis_notifier.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+```bash
+systemctl --user enable --now kalshi-tennis
+```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `Credentials not found` | Run `--setup` or set env vars |
+| `Kalshi API error 401` | Check API key ID and private key are correct |
+| No desktop pop-up | Install `plyer` (`pip install plyer`); notifications still print to terminal |
