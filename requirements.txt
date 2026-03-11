@@ -1,0 +1,6 @@
+# Kalshi Tennis Market Notifier
+# No external dependencies — uses only Python standard library
+# (urllib, json, subprocess, etc.)
+#
+# Optional: install 'plyer' for richer cross-platform notifications
+# pip install plyer
