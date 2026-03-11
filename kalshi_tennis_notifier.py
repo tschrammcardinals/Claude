@@ -80,8 +80,6 @@ TENNIS_TICKER_PREFIXES = [
     "KXATP",            # ATP tour (all variants)
     "KXWTA",            # WTA tour (all variants)
     "KXTENNIS",         # Explicit tennis
-    "KXTABLETENNIS",    # Table tennis
-    "KXTT",             # Table tennis shorthand
     "KXGRANDSLAM",      # Grand slam markets
     "KXDAVISCUP",       # Davis Cup
     "KXUNITEDCUP",      # United Cup
@@ -142,6 +140,8 @@ TENNIS_TICKER_BLACKLIST_PREFIXES = [
     "KXWORLDSMVP",      # World Series MVP
     "KXROSTERT",        # Roster
     "KXWORDNYT",        # NYT word games
+    "KXTABLETENNIS",    # Table tennis (not court tennis)
+    "KXTT",             # Table tennis shorthand
 ]
 
 # Throttle delay between API requests to avoid 429 rate limits
